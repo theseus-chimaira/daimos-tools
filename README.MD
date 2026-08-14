@@ -13,8 +13,9 @@ builders, and simulator helper tools for the DAIMOS/PDP-10 toolchain.
 - `mkstream`: wraps assembled standalone words as a Stage1 stream.
 - `mktap`: writes PDP-6 36-bit words as a SIMH magnetic-tape record.
 - `words2pt`: encodes octal 36-bit words as PDP-6 paper-tape bytes.
-- `pdp10-dec-none-ar`: target archive alias, installed as a symlink to `ar`.
-- `pdp10-dec-none-ranlib`: target ranlib alias, installed as a symlink to `ranlib`.
+- `darc`: builds indexed DARC1 target archives.
+- `dlink`: links DOBJ1 objects and DARC1 archives to DXR V1.
+- `pdp10-dec-none-darc`: target archive alias for `darc`.
 - `simh/*.ini`: SIMH configuration files used by `p10bare`.
 
 The assembler itself lives in the DAS repository. Install DAS and these tools
@@ -22,7 +23,8 @@ under the same `PDP10_PREFIX` when using the full testkit/toolchain flow.
 
 ## Deprecated Python Tools
 
-The Python `p10bare` and `mkrim` are deprecated and will be replaced by C tools soon.
+The old Python bare runner is retained as `p10bare.py` for comparison only.
+The installed `p10bare` is the C89 DOBJ/DARC/DLINK runner. `mkrim.py` is also retained for compatibility.
 
 ## Build And Install
 
@@ -39,7 +41,7 @@ make install PDP10_PREFIX=/path/to/prefix
 ```
 
 If both `PREFIX` and `PDP10_PREFIX` are set, `PDP10_PREFIX` takes precedence.
-Override `TARGET_AR` or `TARGET_RANLIB` to change the symlink targets.
+The obsolete target `ar` and `ranlib` aliases are deliberately removed.
 
 Remove installed files:
 
