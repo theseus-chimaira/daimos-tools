@@ -1,9 +1,7 @@
 PREFIX ?= /usr/local
-ifdef PDP10_PREFIX
-override PREFIX := $(PDP10_PREFIX)
-endif
-BINDIR ?= $(PREFIX)/bin
-DATADIR ?= $(PREFIX)/share/pdp10-tools
+PDP10_PREFIX ?= $(PREFIX)
+BINDIR ?= $(PDP10_PREFIX)/bin
+DATADIR ?= $(PDP10_PREFIX)/share/pdp10-tools
 
 INSTALL ?= install
 LN_S ?= ln -sf
@@ -11,39 +9,40 @@ RM ?= rm -f
 CC ?= cc
 CFLAGS ?= -Wall -Wextra -O2 -std=c89
 
-CTOOLS := dxr2rim mkdsk mkdt mkrim mkstream mktap words2pt
-SCRIPTS := p10bare
-ALIASES := pdp10-dec-none-ar pdp10-dec-none-ranlib
+CTOOLS = dxr2rim mkdsk mkdt mkrim mkstream mktap words2pt
+SCRIPTS = p10bare
+ALIASES = pdp10-dec-none-ar pdp10-dec-none-ranlib
 TARGET_AR ?= ar
 TARGET_RANLIB ?= ranlib
-LEGACY := legacy/mkrim.py
-SIMH_INIS := simh/pdp6.ini simh/pdp10-ka.ini simh/pdp10-ki.ini \
+LEGACY = legacy/mkrim.py
+SIMH_INIS = simh/pdp6.ini simh/pdp10-ka.ini simh/pdp10-ki.ini \
 	simh/pdp10-kl.ini simh/pdp10-ks.ini
+SIMH_NAMES = pdp6.ini pdp10-ka.ini pdp10-ki.ini pdp10-kl.ini pdp10-ks.ini
 
 .PHONY: all clean install uninstall help
 
 all: $(CTOOLS) $(ALIASES)
 
 dxr2rim: dxr2rim.c
-	$(CC) $(CFLAGS) -o $@ $<
+	$(CC) $(CFLAGS) -o $@ dxr2rim.c
 
 mkdsk: mkdsk.c
-	$(CC) $(CFLAGS) -o $@ $<
+	$(CC) $(CFLAGS) -o $@ mkdsk.c
 
 mkdt: mkdt.c
-	$(CC) $(CFLAGS) -o $@ $<
+	$(CC) $(CFLAGS) -o $@ mkdt.c
 
 mkrim: mkrim.c
-	$(CC) $(CFLAGS) -o $@ $<
+	$(CC) $(CFLAGS) -o $@ mkrim.c
 
 mkstream: mkstream.c
-	$(CC) $(CFLAGS) -o $@ $<
+	$(CC) $(CFLAGS) -o $@ mkstream.c
 
 mktap: mktap.c
-	$(CC) $(CFLAGS) -o $@ $<
+	$(CC) $(CFLAGS) -o $@ mktap.c
 
 words2pt: words2pt.c
-	$(CC) $(CFLAGS) -o $@ $<
+	$(CC) $(CFLAGS) -o $@ words2pt.c
 
 pdp10-dec-none-ar:
 	$(LN_S) $(TARGET_AR) $@
@@ -65,10 +64,13 @@ install: all
 	@echo "Installed PDP-10 compatibility tools to $(DESTDIR)$(BINDIR)"
 
 uninstall:
-	$(RM) $(addprefix $(DESTDIR)$(BINDIR)/,$(CTOOLS) $(SCRIPTS) pdp10-dec-none-ar pdp10-dec-none-ranlib)
+	@for f in $(CTOOLS) $(SCRIPTS) pdp10-dec-none-ar pdp10-dec-none-ranlib mkrim.py; do \
+		$(RM) "$(DESTDIR)$(BINDIR)/$$f"; \
+	done
 	$(RM) $(ALIASES)
-	$(RM) $(DESTDIR)$(BINDIR)/mkrim.py
-	$(RM) $(addprefix $(DESTDIR)$(DATADIR)/simh/,$(notdir $(SIMH_INIS)))
+	@for f in $(SIMH_NAMES); do \
+		$(RM) "$(DESTDIR)$(DATADIR)/simh/$$f"; \
+	done
 	@echo "Uninstalled PDP-10 compatibility tools from $(DESTDIR)$(BINDIR)"
 
 help:
@@ -80,7 +82,7 @@ help:
 	@echo "  make clean          remove generated artifacts"
 	@echo ""
 	@echo "Variables:"
-	@echo "  PREFIX=/usr/local   installation prefix"
+	@echo "  PREFIX=/usr/local   default installation prefix"
 	@echo "  PDP10_PREFIX=...    PDP-10 toolchain prefix; overrides PREFIX"
 	@echo "  TARGET_AR=ar        symlink target for pdp10-dec-none-ar"
 	@echo "  TARGET_RANLIB=ranlib symlink target for pdp10-dec-none-ranlib"
