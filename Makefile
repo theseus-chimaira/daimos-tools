@@ -7,7 +7,7 @@ INSTALL ?= install
 LN_S ?= ln -sf
 RM ?= rm -f
 CC ?= cc
-CFLAGS ?= -Wall -Wextra -O2 -std=c89
+CFLAGS ?= -Wall -Wextra -O2 -std=c99
 
 CTOOLS = dxr2rim mkdsk mkdt mkrim mkstream mktap words2pt
 SCRIPTS = p10bare

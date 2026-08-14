@@ -290,7 +290,7 @@ int main(int argc, char **argv)
         char path[512];
         int compact;
         unsigned long long sector[SECTOR_WORDS];
-        int i;
+        int i, pathlen;
 
         for (i = 1; i < argc; i++) {
                 if (strcmp(argv[i], "-n") == 0 && i + 1 < argc)
@@ -333,7 +333,12 @@ int main(int argc, char **argv)
                             members[u].dbx_sector + 1);
                 }
                 members[u].boot_count = (logical_sectors + n - 1U - u) / n;
-                sprintf(path, "%s/dsk%u.dsk", outdir, u);
+                pathlen = snprintf(path, sizeof(path), "%s/dsk%u.dsk",
+                    outdir, u);
+                if (pathlen < 0 || (size_t)pathlen >= sizeof(path)) {
+                        fprintf(stderr, "mkdsk: output path too long\n");
+                        return 1;
+                }
                 files[u] = fopen(path, "wb+");
                 if (files[u] == NULL) {
                         perror(path);
