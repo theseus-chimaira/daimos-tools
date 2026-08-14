@@ -50,3 +50,22 @@ make uninstall PDP10_PREFIX=/path/to/prefix
 ## License
 
 These tools are distributed under the MIT License. See `LICENCE`.
+
+## DOBJ1 and DARC1
+
+`dlink` is the minimal DAIMOS static linker.  It consumes DOBJ1 relocatable
+objects and DARC1 static archives and emits the existing DXR V1 executable
+format.  DOBJ1 deliberately carries only semantic TEXT/DATA/BSS sections,
+global definitions/imports, optional entry selection, and RH18 relocations.
+Local assembler labels are resolved before object emission and are not part of
+the serialized symbol namespace.
+
+`darc` builds a DARC1 archive from DOBJ1 members.  Its index maps exported
+symbols directly to member offsets so `dlink` can extract only members needed
+by currently unresolved globals.  This is the required model for GCC libgcc:
+private labels may be reused in different archive members without collision.
+
+The first format revision intentionally excludes debug records, weak symbols,
+dynamic linking, named sections, and DEC REL compatibility.  TEXT/DATA/BSS
+identity is preserved by the linker so later DAIMOS shared-text and fixed-slot
+overlay outputs do not require an object-format redesign.

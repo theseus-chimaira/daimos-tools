@@ -9,7 +9,7 @@ RM ?= rm -f
 CC ?= cc
 CFLAGS ?= -Wall -Wextra -O2 -std=c99
 
-CTOOLS = dxr2rim mkdsk mkdt mkrim mkstream mktap words2pt
+CTOOLS = dxr2rim mkdsk mkdt mkrim mkstream mktap words2pt dlink darc
 SCRIPTS = p10bare
 ALIASES = pdp10-dec-none-ar pdp10-dec-none-ranlib
 TARGET_AR ?= ar
@@ -19,7 +19,7 @@ SIMH_INIS = simh/pdp6.ini simh/pdp10-ka.ini simh/pdp10-ki.ini \
 	simh/pdp10-kl.ini simh/pdp10-ks.ini
 SIMH_NAMES = pdp6.ini pdp10-ka.ini pdp10-ki.ini pdp10-kl.ini pdp10-ks.ini
 
-.PHONY: all clean install uninstall help
+.PHONY: all clean install uninstall help test
 
 all: $(CTOOLS) $(ALIASES)
 
@@ -44,14 +44,24 @@ mktap: mktap.c
 words2pt: words2pt.c
 	$(CC) $(CFLAGS) -o $@ words2pt.c
 
+dlink: dlink.c dobj.c dobj.h
+	$(CC) $(CFLAGS) -std=c89 -o $@ dlink.c dobj.c
+
+darc: darc.c dobj.c dobj.h
+	$(CC) $(CFLAGS) -std=c89 -o $@ darc.c dobj.c
+
 pdp10-dec-none-ar:
 	$(LN_S) $(TARGET_AR) $@
 
 pdp10-dec-none-ranlib:
 	$(LN_S) $(TARGET_RANLIB) $@
 
+test: dlink darc
+	$(CC) $(CFLAGS) -std=c89 -I. -o tests/dobj-test tests/dobj-test.c dobj.c
+	./tests/dobj-test
+
 clean:
-	$(RM) $(CTOOLS) $(ALIASES) *.o
+	$(RM) $(CTOOLS) $(ALIASES) *.o tests/dobj-test tests/*.dobj tests/*.darc tests/*.dxr
 	$(RM) -r __pycache__ legacy/__pycache__
 
 install: all
