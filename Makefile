@@ -13,6 +13,7 @@ CFLAGS ?= -Wall -Wextra -O2 -std=c89
 
 CTOOLS := dxr2rim mkdsk mkdt mkrim mkstream mktap words2pt
 SCRIPTS := p10bare
+ALIASES := pdp10-dec-none-ar pdp10-dec-none-ranlib
 TARGET_AR ?= ar
 TARGET_RANLIB ?= ranlib
 LEGACY := legacy/mkrim.py
@@ -21,7 +22,7 @@ SIMH_INIS := simh/pdp6.ini simh/pdp10-ka.ini simh/pdp10-ki.ini \
 
 .PHONY: all clean install uninstall help
 
-all: $(CTOOLS)
+all: $(CTOOLS) $(ALIASES)
 
 dxr2rim: dxr2rim.c
 	$(CC) $(CFLAGS) -o $@ $<
@@ -44,8 +45,14 @@ mktap: mktap.c
 words2pt: words2pt.c
 	$(CC) $(CFLAGS) -o $@ $<
 
+pdp10-dec-none-ar:
+	$(LN_S) $(TARGET_AR) $@
+
+pdp10-dec-none-ranlib:
+	$(LN_S) $(TARGET_RANLIB) $@
+
 clean:
-	$(RM) $(CTOOLS) *.o
+	$(RM) $(CTOOLS) $(ALIASES) *.o
 	$(RM) -r __pycache__ legacy/__pycache__
 
 install: all
@@ -59,6 +66,7 @@ install: all
 
 uninstall:
 	$(RM) $(addprefix $(DESTDIR)$(BINDIR)/,$(CTOOLS) $(SCRIPTS) pdp10-dec-none-ar pdp10-dec-none-ranlib)
+	$(RM) $(ALIASES)
 	$(RM) $(DESTDIR)$(BINDIR)/mkrim.py
 	$(RM) $(addprefix $(DESTDIR)$(DATADIR)/simh/,$(notdir $(SIMH_INIS)))
 	@echo "Uninstalled PDP-10 compatibility tools from $(DESTDIR)$(BINDIR)"

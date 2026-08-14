@@ -26,7 +26,7 @@ The Python `p10bare` and `mkrim` are deprecated and will be replaced by C tools 
 
 ## Build And Install
 
-Build the host C tools:
+Build the host C tools and target aliases:
 
 ```sh
 make
