@@ -5,7 +5,7 @@ builders, and simulator helper tools for the DAIMOS/PDP-10 toolchain.
 
 ## Tools
 
-- `p10bare`: small PDP-6/KA10/KI10/KS10/KL10 SIMH bare-metal test runner.
+- `p10run`: small PDP-6/KA10/KI10/KS10/KL10 SIMH bare-metal test runner.
 - `dxr2rim`: converts DAIMOS DXR V1 to PDP-6 RIM tape.
 - `mkdsk`: creates small PDP-6 DSK270 DBOOT V1 test bootsets.
 - `mkdt`: writes PDP-6 18-bit SIMH DECtape images.
@@ -16,15 +16,14 @@ builders, and simulator helper tools for the DAIMOS/PDP-10 toolchain.
 - `darc`: builds indexed DARC1 target archives.
 - `dlink`: links DOBJ1 objects and DARC1 archives to DXR V1.
 - `pdp10-dec-none-darc`: target archive alias for `darc`.
-- `simh/*.ini`: SIMH configuration files used by `p10bare`.
+- `simh/*.ini`: SIMH configuration files used by `p10run`.
 
 The assembler itself lives in the DAS repository. Install DAS and these tools
 under the same `PDP10_PREFIX` when using the full testkit/toolchain flow.
 
-## Deprecated Python Tools
+## Legacy Python Tool
 
-The old Python bare runner is retained as `p10bare.py` for comparison only.
-The installed `p10bare` is the C89 DOBJ/DARC/DLINK runner. `mkrim.py` is also retained for compatibility.
+`mkrim.py` is retained for compatibility. The old Python bare runner has been removed; `p10run` is the sole PDP-10 execution/test runner.
 
 ## Build And Install
 

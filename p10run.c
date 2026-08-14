@@ -1,7 +1,7 @@
 #define _POSIX_C_SOURCE 199309L
 
 /*
- * p10bare.c - minimal PDP-6/PDP-10 bare-metal semantic test runner.
+ * p10run.c - minimal PDP-6/PDP-10 bare-metal semantic test runner.
  *
  * The runner deliberately knows nothing about assembler symbol resolution or
  * libgcc source structure.  GCC/DAS produce DOBJ objects, dlink resolves them
@@ -19,7 +19,7 @@
 #include <signal.h>
 #include <unistd.h>
 
-#define P10BARE_VERSION "p10bare-dobj-v1_20260814"
+#define P10RUN_VERSION "p10run-dobj-v1_20260814"
 #define PATHSZ 4096
 #define MAX_ITEMS 256
 #define MAX_LABELS 2048
@@ -73,13 +73,13 @@ struct options {
 
 static void die(const char *s)
 {
-    fprintf(stderr, "p10bare: %s\n", s);
+    fprintf(stderr, "p10run: %s\n", s);
     exit(1);
 }
 
 static void die_path(const char *s, const char *p)
 {
-    fprintf(stderr, "p10bare: %s: %s\n", s, p);
+    fprintf(stderr, "p10run: %s: %s\n", s, p);
     exit(1);
 }
 
@@ -200,7 +200,7 @@ static void expect_add(struct expect_list *l, const char *s)
 static void usage(void)
 {
     fprintf(stderr,
-        "usage: p10bare [options] source...\n"
+        "usage: p10run [options] source...\n"
         "  --machine pdp6|ka10|ki10|ks10|kl10\n"
         "  --mode rim|deposit\n"
         "  --start OCTAL\n"
@@ -246,7 +246,7 @@ static void parse_args(struct options *o, int argc, char **argv)
         const char *a;
         a = argv[i];
         if (strcmp(a, "--version") == 0) {
-            printf("%s\n", P10BARE_VERSION);
+            printf("%s\n", P10RUN_VERSION);
             exit(0);
         } else if (strcmp(a, "--machine") == 0) {
             o->machine = need_arg(argc, argv, &i);
@@ -412,7 +412,7 @@ static void object_path(char *out, const char *work, int n, const char *src)
     stem_name(stem, src);
     {
         char leaf[MAX_NAME + 32];
-        sprintf(leaf, "p10bare-%03d-%s.dobj", n, stem);
+        sprintf(leaf, "p10run-%03d-%s.dobj", n, stem);
         make_path2(out, PATHSZ, work, leaf);
     }
 }
@@ -463,7 +463,7 @@ static void find_libgcc(char *out, const char *gcc, const char *work)
     av[0] = (char *)gcc;
     av[1] = (char *)"-print-libgcc-file-name";
     av[2] = NULL;
-    make_path2(tmp, sizeof(tmp), work, "p10bare-libgcc-path.txt");
+    make_path2(tmp, sizeof(tmp), work, "p10run-libgcc-path.txt");
     if (run_wait(av, NULL, tmp, 30) != 0)
         die("cannot locate libgcc");
     f = fopen(tmp, "r");
@@ -610,19 +610,19 @@ static void add_default_ini(FILE *f, const char *work, const char *tools,
     name = machine_ini_name(machine);
     join_path(p, work, name);
     if (path_exists(p)) {
-        fprintf(f, "echo __P10BARE_INI__ %s\ndo %s\n", p, p);
+        fprintf(f, "echo __P10RUN_INI__ %s\ndo %s\n", p, p);
         return;
     }
     join_path(p, tools, "simh");
     join_path(q, p, name);
     if (path_exists(q)) {
-        fprintf(f, "echo __P10BARE_INI__ %s\ndo %s\n", q, q);
+        fprintf(f, "echo __P10RUN_INI__ %s\ndo %s\n", q, q);
         return;
     }
     join_path(p, prefix, "share/pdp10-tools/simh");
     join_path(q, p, name);
     if (path_exists(q))
-        fprintf(f, "echo __P10BARE_INI__ %s\ndo %s\n", q, q);
+        fprintf(f, "echo __P10RUN_INI__ %s\ndo %s\n", q, q);
 }
 
 static void write_run_script(const struct options *o, const char *path,
@@ -636,41 +636,41 @@ static void write_run_script(const struct options *o, const char *path,
     f = fopen(path, "w");
     if (f == NULL)
         die_path("cannot write SIMH script", path);
-    fprintf(f, "echo __P10BARE_START__ machine=%s mode=%s entry=%lo\n",
+    fprintf(f, "echo __P10RUN_START__ machine=%s mode=%s entry=%lo\n",
             o->machine, o->mode, entry);
     if (!o->no_default_ini)
         add_default_ini(f, work, tools, prefix, o->machine);
     for (i = 0; i < o->ini.n; i++)
-        fprintf(f, "echo __P10BARE_INI__ %s\ndo %s\n", o->ini.v[i], o->ini.v[i]);
+        fprintf(f, "echo __P10RUN_INI__ %s\ndo %s\n", o->ini.v[i], o->ini.v[i]);
     for (i = 0; i < o->set_cmd.n; i++)
         fprintf(f, "%s\n", o->set_cmd.v[i]);
     if (strcmp(o->mode, "rim") == 0)
         fprintf(f, "load %s\n", image);
     else
         fprintf(f, "do %s\n", image);
-    fprintf(f, "echo __P10BARE_LOW_CORE_BREAK__ 20\nbreak 20\n");
+    fprintf(f, "echo __P10RUN_LOW_CORE_BREAK__ 20\nbreak 20\n");
     if (strcmp(o->exec_mode, "step") == 0) {
-        fprintf(f, "echo __P10BARE_RUN__ STEP %s PC=%lo\n", o->step_limit, entry);
+        fprintf(f, "echo __P10RUN_RUN__ STEP %s PC=%lo\n", o->step_limit, entry);
         fprintf(f, "deposit %s %lo\nexamine %s\nstep %s\n",
                 o->pc_reg, entry, o->pc_reg, o->step_limit);
     } else {
-        fprintf(f, "echo __P10BARE_RUN__ GO %lo\ngo %lo\n", entry, entry);
+        fprintf(f, "echo __P10RUN_RUN__ GO %lo\ngo %lo\n", entry, entry);
     }
-    fprintf(f, "echo __P10BARE_AFTER_RUN__\nexamine %s\n", o->pc_reg);
+    fprintf(f, "echo __P10RUN_AFTER_RUN__\nexamine %s\n", o->pc_reg);
     for (i = 0; i < o->expects.n; i++) {
         unsigned long addr;
         if (!find_label(labels, o->expects.v[i].name, &addr))
             die_path("expected label not found", o->expects.v[i].name);
-        fprintf(f, "echo __P10BARE_EXPECT__ %s %lo %012lo\nexamine %lo\n",
+        fprintf(f, "echo __P10RUN_EXPECT__ %s %lo %012lo\nexamine %lo\n",
                 o->expects.v[i].name, addr, o->expects.v[i].value, addr);
     }
     for (i = 0; i < o->examine.n; i++) {
         unsigned long addr;
         if (find_label(labels, o->examine.v[i], &addr))
-            fprintf(f, "echo __P10BARE_EXAMINE__ %s %lo\nexamine %lo\n",
+            fprintf(f, "echo __P10RUN_EXAMINE__ %s %lo\nexamine %lo\n",
                     o->examine.v[i], addr, addr);
         else
-            fprintf(f, "echo __P10BARE_EXAMINE__ %s\nexamine %s\n",
+            fprintf(f, "echo __P10RUN_EXAMINE__ %s\nexamine %s\n",
                     o->examine.v[i], o->examine.v[i]);
     }
     fprintf(f, "quit\n");
@@ -781,7 +781,7 @@ static int evaluate(const struct options *o, const char *text)
     }
     for (i = 0; i < o->expects.n; i++) {
         unsigned long got;
-        if (!parse_examine_after(text, "__P10BARE_EXPECT__",
+        if (!parse_examine_after(text, "__P10RUN_EXPECT__",
                                  o->expects.v[i].name, &got)) {
             fprintf(stderr, "FAIL: %s: no readable examine output\n",
                     o->expects.v[i].name);
@@ -807,8 +807,8 @@ static void write_report(const char *path, const struct options *o,
     f = fopen(path, "w");
     if (f == NULL)
         return;
-    fprintf(f, "========== p10bare report ==========\n");
-    fprintf(f, "version=%s\n", P10BARE_VERSION);
+    fprintf(f, "========== p10run report ==========\n");
+    fprintf(f, "version=%s\n", P10RUN_VERSION);
     fprintf(f, "machine=%s\nmode=%s\nexec_mode=%s\n", o->machine, o->mode, o->exec_mode);
     fprintf(f, "start=%lo\nentry=%lo\ntimeout=%d\n", start, entry, o->timeout);
     fprintf(f, "gcc=%s\nassembler=%s\ndlink=%s\nlibgcc=%s\nsimh=%s\n",

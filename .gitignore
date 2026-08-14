@@ -10,3 +10,12 @@ mktap
 words2pt
 pdp10-dec-none-ar
 pdp10-dec-none-ranlib
+dlink
+darc
+p10run
+pdp10-dec-none-darc
+tests/dobj-test
+tests/*.dobj
+tests/*.darc
+tests/*.dxr
+tests/*.map
