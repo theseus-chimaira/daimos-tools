@@ -62,7 +62,7 @@ test: dlink darc
 	./tests/dobj-test
 
 clean:
-	$(RM) $(CTOOLS) $(ALIASES) $(REMOVED_ALIASES) *.o tests/dobj-test tests/*.dobj tests/*.darc tests/*.dxr
+	$(RM) $(CTOOLS) $(ALIASES) $(REMOVED_ALIASES) *.o tests/dobj-test tests/*.dobj tests/*.darc tests/*.dxr tests/*.map
 	$(RM) -r __pycache__ legacy/__pycache__
 
 install: all

@@ -325,6 +325,32 @@ static int apply_relocs(struct linker *l, struct dobj_word *image,
     return 0;
 }
 
+static int write_map(const char *name, struct linker *l)
+{
+    FILE *f;
+    int i;
+
+    f = fopen(name, "w");
+    if (f == NULL)
+        return -1;
+    for (i = 0; i < l->def_count; i++) {
+        unsigned long addr;
+        int relative;
+
+        if (symbol_address(l, i, &addr, &relative) != 0 ||
+            fprintf(f, "%-32s %06lo\n", l->defs[i].name, addr) < 0) {
+            fclose(f);
+            remove(name);
+            return -1;
+        }
+    }
+    if (fclose(f) != 0) {
+        remove(name);
+        return -1;
+    }
+    return 0;
+}
+
 static int write_dxr(const char *name, struct linker *l)
 {
     unsigned long tw, dw, bw, iw, rw;
@@ -398,23 +424,33 @@ static void cleanup(struct linker *l)
 
 static void usage(void)
 {
-    fprintf(stderr, "usage: dlink -o out.dxr input.dobj|library.darc ...\n");
+    fprintf(stderr, "usage: dlink -o out.dxr [-M out.map] input.dobj|library.darc ...\n");
 }
 
 int main(int argc, char **argv)
 {
     struct linker l;
     const char *out;
+    const char *map;
     int i;
     int first;
     int rc;
 
     memset(&l, 0, sizeof(l));
     out = NULL;
+    map = NULL;
     first = 1;
-    if (argc > 2 && strcmp(argv[1], "-o") == 0) {
-        out = argv[2];
-        first = 3;
+    while (first < argc && argv[first][0] == '-') {
+        if (strcmp(argv[first], "-o") == 0 && first + 1 < argc) {
+            out = argv[first + 1];
+            first += 2;
+        } else if (strcmp(argv[first], "-M") == 0 && first + 1 < argc) {
+            map = argv[first + 1];
+            first += 2;
+        } else {
+            usage();
+            return 1;
+        }
     }
     if (out == NULL || first >= argc) { usage(); return 1; }
     rc = 1;
@@ -445,6 +481,11 @@ int main(int argc, char **argv)
         goto done;
     if (write_dxr(out, &l) != 0) {
         fprintf(stderr, "dlink: link failed\n");
+        goto done;
+    }
+    if (map != NULL && write_map(map, &l) != 0) {
+        fprintf(stderr, "dlink: cannot write map\n");
+        remove(out);
         goto done;
     }
     rc = 0;

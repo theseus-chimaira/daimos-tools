@@ -90,6 +90,8 @@ bad:
 int main(void)
 {
     long add;
+    struct dobj_object main_o, helper_o, unused_o;
+    int rc;
 
     if (dobj_word_addend18(dobj_word_halves(0UL, 0777777UL), &add) != 0 ||
         add != 0777777L) {
@@ -101,9 +103,6 @@ int main(void)
         fprintf(stderr, "dobj-test: negative RH18 addend contract failed\n");
         return 1;
     }
-    struct dobj_object main_o, helper_o, unused_o;
-    int rc;
-
     make_main(&main_o);
     make_helper(&helper_o, "__helper", 0123456UL);
     make_helper(&unused_o, "__unused", 0654321UL);
@@ -115,10 +114,31 @@ int main(void)
         fprintf(stderr, "dobj-test: darc archive creation failed\n");
         return 1;
     }
-    rc = system("./dlink -o tests/out.dxr tests/main.dobj tests/libtest.darc");
+    rc = system("./dlink -o tests/out.dxr -M tests/out.map tests/main.dobj tests/libtest.darc");
     if (rc != 0 || check_dxr("tests/out.dxr") != 0) {
         fprintf(stderr, "dobj-test: link/archive/local relocation contract failed\n");
         return 1;
+    }
+    {
+        FILE *mf;
+        char line[160];
+        int saw_main;
+        int saw_helper;
+        int saw_unused;
+
+        saw_main = saw_helper = saw_unused = 0;
+        mf = fopen("tests/out.map", "r");
+        if (mf == NULL) return 1;
+        while (fgets(line, sizeof(line), mf) != NULL) {
+            if (strncmp(line, "main ", 5U) == 0) saw_main = 1;
+            if (strncmp(line, "__helper ", 9U) == 0) saw_helper = 1;
+            if (strncmp(line, "__unused ", 9U) == 0) saw_unused = 1;
+        }
+        fclose(mf);
+        if (!saw_main || !saw_helper || saw_unused) {
+            fprintf(stderr, "dobj-test: linker map/archive selection contract failed\n");
+            return 1;
+        }
     }
     rc = system("./dlink -o tests/bad-undef.dxr tests/main.dobj >/dev/null 2>&1");
     if (rc == 0) {
