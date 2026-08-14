@@ -11,17 +11,21 @@ CFLAGS ?= -Wall -Wextra -O2 -std=c99
 
 CTOOLS = dxr2rim mkdsk mkdt mkrim mkstream mktap words2pt dlink darc
 SCRIPTS = p10bare
-ALIASES = pdp10-dec-none-ar pdp10-dec-none-ranlib
-TARGET_AR ?= ar
-TARGET_RANLIB ?= ranlib
+ALIASES = pdp10-dec-none-darc
+REMOVED_ALIASES = pdp10-dec-none-ar pdp10-dec-none-ranlib
 LEGACY = legacy/mkrim.py
 SIMH_INIS = simh/pdp6.ini simh/pdp10-ka.ini simh/pdp10-ki.ini \
 	simh/pdp10-kl.ini simh/pdp10-ks.ini
 SIMH_NAMES = pdp6.ini pdp10-ka.ini pdp10-ki.ini pdp10-kl.ini pdp10-ks.ini
 
-.PHONY: all clean install uninstall help test
+.PHONY: all clean install uninstall help test remove-legacy-aliases
 
-all: $(CTOOLS) $(ALIASES)
+all: remove-legacy-aliases $(CTOOLS) $(ALIASES)
+
+remove-legacy-aliases:
+	@for f in $(REMOVED_ALIASES); do \
+		test ! -L "$$f" || $(RM) "$$f"; \
+	done
 
 dxr2rim: dxr2rim.c
 	$(CC) $(CFLAGS) -o $@ dxr2rim.c
@@ -50,31 +54,30 @@ dlink: dlink.c dobj.c dobj.h
 darc: darc.c dobj.c dobj.h
 	$(CC) $(CFLAGS) -std=c89 -o $@ darc.c dobj.c
 
-pdp10-dec-none-ar:
-	$(LN_S) $(TARGET_AR) $@
-
-pdp10-dec-none-ranlib:
-	$(LN_S) $(TARGET_RANLIB) $@
+pdp10-dec-none-darc: darc
+	$(LN_S) darc $@
 
 test: dlink darc
 	$(CC) $(CFLAGS) -std=c89 -I. -o tests/dobj-test tests/dobj-test.c dobj.c
 	./tests/dobj-test
 
 clean:
-	$(RM) $(CTOOLS) $(ALIASES) *.o tests/dobj-test tests/*.dobj tests/*.darc tests/*.dxr
+	$(RM) $(CTOOLS) $(ALIASES) $(REMOVED_ALIASES) *.o tests/dobj-test tests/*.dobj tests/*.darc tests/*.dxr
 	$(RM) -r __pycache__ legacy/__pycache__
 
 install: all
 	$(INSTALL) -d $(DESTDIR)$(BINDIR) $(DESTDIR)$(DATADIR)/simh
 	$(INSTALL) -m 755 $(CTOOLS) $(SCRIPTS) $(DESTDIR)$(BINDIR)/
-	$(LN_S) $(TARGET_AR) $(DESTDIR)$(BINDIR)/pdp10-dec-none-ar
-	$(LN_S) $(TARGET_RANLIB) $(DESTDIR)$(BINDIR)/pdp10-dec-none-ranlib
+	@for f in $(REMOVED_ALIASES); do \
+		test ! -L "$(DESTDIR)$(BINDIR)/$$f" || $(RM) "$(DESTDIR)$(BINDIR)/$$f"; \
+	done
+	$(LN_S) darc $(DESTDIR)$(BINDIR)/pdp10-dec-none-darc
 	$(INSTALL) -m 755 $(LEGACY) $(DESTDIR)$(BINDIR)/mkrim.py
 	$(INSTALL) -m 644 $(SIMH_INIS) $(DESTDIR)$(DATADIR)/simh/
 	@echo "Installed PDP-10 compatibility tools to $(DESTDIR)$(BINDIR)"
 
 uninstall:
-	@for f in $(CTOOLS) $(SCRIPTS) pdp10-dec-none-ar pdp10-dec-none-ranlib mkrim.py; do \
+	@for f in $(CTOOLS) $(SCRIPTS) pdp10-dec-none-darc mkrim.py; do \
 		$(RM) "$(DESTDIR)$(BINDIR)/$$f"; \
 	done
 	$(RM) $(ALIASES)
@@ -94,5 +97,3 @@ help:
 	@echo "Variables:"
 	@echo "  PREFIX=/usr/local   default installation prefix"
 	@echo "  PDP10_PREFIX=...    PDP-10 toolchain prefix; overrides PREFIX"
-	@echo "  TARGET_AR=ar        symlink target for pdp10-dec-none-ar"
-	@echo "  TARGET_RANLIB=ranlib symlink target for pdp10-dec-none-ranlib"
