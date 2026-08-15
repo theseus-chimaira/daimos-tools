@@ -9,9 +9,9 @@ RM ?= rm -f
 CC ?= cc
 CFLAGS ?= -Wall -Wextra -O2 -std=c99
 
-CTOOLS = mkdsk mkdt mkstream mktap words2pt dlink darc p10run
+CTOOLS = mkdsk mkdt mkstream mktap words2pt dlink darc p10run pdp10-objdump
 SCRIPTS =
-ALIASES = pdp10-dec-none-darc
+ALIASES = pdp10-dec-none-darc pdp10-dec-none-objdump
 REMOVED_ALIASES = pdp10-dec-none-ar pdp10-dec-none-ranlib
 REMOVED_TOOLS = dxr2rim mkrim mkrim.py p10bare p10bare.py
 SIMH_INIS = simh/pdp6.ini simh/pdp10-ka.ini simh/pdp10-ki.ini \
@@ -51,17 +51,25 @@ darc: darc.c dobj.c dobj.h
 p10run: p10run.c
 	$(CC) $(CFLAGS) -std=c89 -o $@ p10run.c
 
+pdp10-objdump: pdp10-objdump.c dobj.c dobj.h
+	$(CC) $(CFLAGS) -o $@ pdp10-objdump.c dobj.c
+
 pdp10-dec-none-darc: darc
 	$(LN_S) darc $@
 
-test: dlink darc p10run
+pdp10-dec-none-objdump: pdp10-objdump
+	$(LN_S) pdp10-objdump $@
+
+test: dlink darc p10run pdp10-objdump
 	$(CC) $(CFLAGS) -std=c89 -I. -o tests/dobj-test tests/dobj-test.c dobj.c
 	./tests/dobj-test
+	$(CC) $(CFLAGS) -I. -o tests/pdp10-objdump-mk tests/pdp10-objdump-test.c dobj.c
+	./tests/pdp10-objdump-test.sh
 	./tests/p10run-c89-test.sh
 	./tests/p10run-functional-test.sh
 
 clean:
-	$(RM) $(CTOOLS) $(ALIASES) $(REMOVED_ALIASES) $(REMOVED_TOOLS) *.o tests/dobj-test tests/*.dobj tests/*.darc tests/*.dxr tests/*.map
+	$(RM) $(CTOOLS) $(ALIASES) $(REMOVED_ALIASES) $(REMOVED_TOOLS) *.o tests/dobj-test tests/pdp10-objdump-mk tests/*.dobj tests/*.darc tests/*.dxr tests/*.map
 	$(RM) -r __pycache__ legacy/__pycache__
 
 install: all
@@ -72,11 +80,12 @@ install: all
 		test ! -L "$(DESTDIR)$(BINDIR)/$$f" || $(RM) "$(DESTDIR)$(BINDIR)/$$f"; \
 	done
 	$(LN_S) darc $(DESTDIR)$(BINDIR)/pdp10-dec-none-darc
+	$(LN_S) pdp10-objdump $(DESTDIR)$(BINDIR)/pdp10-dec-none-objdump
 	$(INSTALL) -m 644 $(SIMH_INIS) $(DESTDIR)$(DATADIR)/simh/
 	@echo "Installed PDP-10 compatibility tools to $(DESTDIR)$(BINDIR)"
 
 uninstall:
-	@for f in $(CTOOLS) $(SCRIPTS) pdp10-dec-none-darc; do \
+	@for f in $(CTOOLS) $(SCRIPTS) pdp10-dec-none-darc pdp10-dec-none-objdump; do \
 		$(RM) "$(DESTDIR)$(BINDIR)/$$f"; \
 	done
 	$(RM) $(ALIASES)
