@@ -64,6 +64,70 @@ static void make_helper(struct dobj_object *o, const char *name,
     o->relocs[0].addend = dobj_word_halves(0UL, 0UL);
 }
 
+static void make_plain(struct dobj_object *o, unsigned long marker)
+{
+    memset(o, 0, sizeof(*o));
+    o->text_words = 1UL;
+    o->text = (struct dobj_word *)calloc(1U, sizeof(*o->text));
+    if (o->text != NULL)
+        o->text[0] = dobj_word_halves(marker, 0UL);
+}
+
+static int check_many_inputs(void)
+{
+    enum { MANY_COUNT = 300 };
+    struct dobj_object o;
+    char name[64];
+    char *cmd;
+    size_t cap;
+    size_t used;
+    int i;
+    int rc;
+    FILE *f;
+    struct dobj_word w;
+
+    cap = 64U + (size_t)MANY_COUNT * 32U;
+    cmd = (char *)malloc(cap);
+    if (cmd == NULL)
+        return -1;
+    strcpy(cmd, "./dlink -o tests/many.dxr");
+    used = strlen(cmd);
+    for (i = 0; i < MANY_COUNT; i++) {
+        sprintf(name, "tests/many-%03d.dobj", i);
+        make_plain(&o, (unsigned long)i);
+        if (o.text == NULL || save_object(name, &o) != 0) {
+            dobj_free(&o);
+            free(cmd);
+            return -1;
+        }
+        dobj_free(&o);
+        if (used + strlen(name) + 2U >= cap) {
+            free(cmd);
+            return -1;
+        }
+        cmd[used++] = ' ';
+        strcpy(cmd + used, name);
+        used += strlen(name);
+    }
+    rc = system(cmd);
+    free(cmd);
+    if (rc != 0)
+        return -1;
+    f = fopen("tests/many.dxr", "rb");
+    if (f == NULL || dobj_read_word(f, &w) != 0 ||
+        dobj_read_word(f, &w) != 0 || w.lh != (unsigned long)MANY_COUNT) {
+        if (f != NULL) fclose(f);
+        return -1;
+    }
+    fclose(f);
+    for (i = 0; i < MANY_COUNT; i++) {
+        sprintf(name, "tests/many-%03d.dobj", i);
+        remove(name);
+    }
+    remove("tests/many.dxr");
+    return 0;
+}
+
 static int check_dxr(const char *name)
 {
     FILE *f;
@@ -148,6 +212,10 @@ int main(void)
     rc = system("./dlink -o tests/bad-dup.dxr tests/helper.dobj tests/helper.dobj >/dev/null 2>&1");
     if (rc == 0) {
         fprintf(stderr, "dobj-test: duplicate global was accepted\n");
+        return 1;
+    }
+    if (check_many_inputs() != 0) {
+        fprintf(stderr, "dobj-test: dynamic input capacity contract failed\n");
         return 1;
     }
     printf("DOBJ1/DARC1 linker contract passed\n");

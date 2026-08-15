@@ -3,23 +3,22 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <limits.h>
 
 #define HALF_MASK 0777777UL
-#define MAX_INPUTS 256
-
 struct link_object {
     struct dobj_object obj;
     unsigned long text_base;
     unsigned long data_base;
     unsigned long bss_base;
-    int selected;
 };
 
 struct link_archive {
     FILE *file;
     struct dobj_archive ar;
-    unsigned long loaded_offsets[MAX_INPUTS];
+    unsigned long *loaded_offsets;
     int loaded_count;
+    int loaded_cap;
 };
 
 struct global_def {
@@ -29,13 +28,33 @@ struct global_def {
 };
 
 struct linker {
-    struct link_object objects[MAX_INPUTS];
+    struct link_object *objects;
     int object_count;
-    struct link_archive archives[MAX_INPUTS];
+    int object_cap;
+    struct link_archive *archives;
     int archive_count;
-    struct global_def defs[MAX_INPUTS * 16];
+    int archive_cap;
+    struct global_def *defs;
     int def_count;
+    int def_cap;
 };
+
+static void *grow_array(void *p, int *cap, size_t elem_size)
+{
+    int newcap;
+    void *q;
+
+    if (*cap > INT_MAX / 2)
+        return NULL;
+    newcap = *cap == 0 ? 8 : *cap * 2;
+    if ((size_t)newcap > ((size_t)-1) / elem_size)
+        return NULL;
+    q = realloc(p, (size_t)newcap * elem_size);
+    if (q == NULL)
+        return NULL;
+    *cap = newcap;
+    return q;
+}
 
 static struct dobj_word sixbit_word(const char *s)
 {
@@ -55,10 +74,14 @@ static struct dobj_word sixbit_word(const char *s)
 
 static int add_object(struct linker *l, struct dobj_object *obj)
 {
-    if (l->object_count >= MAX_INPUTS)
-        return -1;
+    if (l->object_count == l->object_cap) {
+        void *p;
+        p = grow_array(l->objects, &l->object_cap, sizeof(l->objects[0]));
+        if (p == NULL)
+            return -1;
+        l->objects = (struct link_object *)p;
+    }
     l->objects[l->object_count].obj = *obj;
-    l->objects[l->object_count].selected = 1;
     memset(obj, 0, sizeof(*obj));
     l->object_count++;
     return 0;
@@ -90,9 +113,14 @@ static int rebuild_defs(struct linker *l)
                 fprintf(stderr, "dlink: duplicate global: %s\n", s->name);
                 return -1;
             }
-            if (l->def_count >= (int)(sizeof(l->defs) / sizeof(l->defs[0]))) {
-                fprintf(stderr, "dlink: too many globals\n");
-                return -1;
+            if (l->def_count == l->def_cap) {
+                void *p;
+                p = grow_array(l->defs, &l->def_cap, sizeof(l->defs[0]));
+                if (p == NULL) {
+                    fprintf(stderr, "dlink: out of memory for globals\n");
+                    return -1;
+                }
+                l->defs = (struct global_def *)p;
             }
             strcpy(l->defs[l->def_count].name, s->name);
             l->defs[l->def_count].object_index = oi;
@@ -123,8 +151,15 @@ static int try_extract(struct linker *l, const char *name)
             continue;
         if (archive_offset_loaded(&l->archives[ai], off))
             return 0;
-        if (l->archives[ai].loaded_count >= MAX_INPUTS)
-            return -1;
+        if (l->archives[ai].loaded_count == l->archives[ai].loaded_cap) {
+            void *p;
+            p = grow_array(l->archives[ai].loaded_offsets,
+                           &l->archives[ai].loaded_cap,
+                           sizeof(l->archives[ai].loaded_offsets[0]));
+            if (p == NULL)
+                return -1;
+            l->archives[ai].loaded_offsets = (unsigned long *)p;
+        }
         if (dobj_archive_read_member(&l->archives[ai].ar, off, &obj) != 0) {
             fprintf(stderr, "dlink: bad archive member for %s\n", name);
             return -1;
@@ -419,7 +454,11 @@ static void cleanup(struct linker *l)
     for (i = 0; i < l->archive_count; i++) {
         dobj_archive_close(&l->archives[i].ar);
         fclose(l->archives[i].file);
+        free(l->archives[i].loaded_offsets);
     }
+    free(l->objects);
+    free(l->archives);
+    free(l->defs);
 }
 
 static void usage(void)
@@ -467,8 +506,14 @@ int main(int argc, char **argv)
             fclose(f);
         } else if (dobj_is_archive(f)) {
             struct link_archive *a;
-            if (l.archive_count >= MAX_INPUTS) { fclose(f); goto done; }
+            if (l.archive_count == l.archive_cap) {
+                void *p;
+                p = grow_array(l.archives, &l.archive_cap, sizeof(l.archives[0]));
+                if (p == NULL) { fclose(f); goto done; }
+                l.archives = (struct link_archive *)p;
+            }
             a = &l.archives[l.archive_count];
+            memset(a, 0, sizeof(*a));
             a->file = f;
             if (dobj_archive_open(f, &a->ar) != 0) { fclose(f); goto done; }
             l.archive_count++;
