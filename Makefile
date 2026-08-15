@@ -9,12 +9,11 @@ RM ?= rm -f
 CC ?= cc
 CFLAGS ?= -Wall -Wextra -O2 -std=c99
 
-CTOOLS = dxr2rim mkdsk mkdt mkrim mkstream mktap words2pt dlink darc p10run
+CTOOLS = mkdsk mkdt mkstream mktap words2pt dlink darc p10run
 SCRIPTS =
 ALIASES = pdp10-dec-none-darc
 REMOVED_ALIASES = pdp10-dec-none-ar pdp10-dec-none-ranlib
-REMOVED_RUNNERS = p10bare p10bare.py
-LEGACY = legacy/mkrim.py
+REMOVED_TOOLS = dxr2rim mkrim mkrim.py p10bare p10bare.py
 SIMH_INIS = simh/pdp6.ini simh/pdp10-ka.ini simh/pdp10-ki.ini \
 	simh/pdp10-kl.ini simh/pdp10-ks.ini
 SIMH_NAMES = pdp6.ini pdp10-ka.ini pdp10-ki.ini pdp10-kl.ini pdp10-ks.ini
@@ -28,17 +27,11 @@ remove-legacy-aliases:
 		test ! -L "$$f" || $(RM) "$$f"; \
 	done
 
-dxr2rim: dxr2rim.c
-	$(CC) $(CFLAGS) -o $@ dxr2rim.c
-
 mkdsk: mkdsk.c
 	$(CC) $(CFLAGS) -o $@ mkdsk.c
 
 mkdt: mkdt.c
 	$(CC) $(CFLAGS) -o $@ mkdt.c
-
-mkrim: mkrim.c
-	$(CC) $(CFLAGS) -o $@ mkrim.c
 
 mkstream: mkstream.c
 	$(CC) $(CFLAGS) -o $@ mkstream.c
@@ -67,23 +60,22 @@ test: dlink darc p10run
 	./tests/p10run-c89-test.sh
 
 clean:
-	$(RM) $(CTOOLS) $(ALIASES) $(REMOVED_ALIASES) $(REMOVED_RUNNERS) *.o tests/dobj-test tests/*.dobj tests/*.darc tests/*.dxr tests/*.map
+	$(RM) $(CTOOLS) $(ALIASES) $(REMOVED_ALIASES) $(REMOVED_TOOLS) *.o tests/dobj-test tests/*.dobj tests/*.darc tests/*.dxr tests/*.map
 	$(RM) -r __pycache__ legacy/__pycache__
 
 install: all
 	$(INSTALL) -d $(DESTDIR)$(BINDIR) $(DESTDIR)$(DATADIR)/simh
-	@for f in $(REMOVED_RUNNERS); do $(RM) "$(DESTDIR)$(BINDIR)/$$f"; done
+	@for f in $(REMOVED_TOOLS); do $(RM) "$(DESTDIR)$(BINDIR)/$$f"; done
 	$(INSTALL) -m 755 $(CTOOLS) $(SCRIPTS) $(DESTDIR)$(BINDIR)/
 	@for f in $(REMOVED_ALIASES); do \
 		test ! -L "$(DESTDIR)$(BINDIR)/$$f" || $(RM) "$(DESTDIR)$(BINDIR)/$$f"; \
 	done
 	$(LN_S) darc $(DESTDIR)$(BINDIR)/pdp10-dec-none-darc
-	$(INSTALL) -m 755 legacy/mkrim.py $(DESTDIR)$(BINDIR)/mkrim.py
 	$(INSTALL) -m 644 $(SIMH_INIS) $(DESTDIR)$(DATADIR)/simh/
 	@echo "Installed PDP-10 compatibility tools to $(DESTDIR)$(BINDIR)"
 
 uninstall:
-	@for f in $(CTOOLS) $(SCRIPTS) pdp10-dec-none-darc mkrim.py; do \
+	@for f in $(CTOOLS) $(SCRIPTS) pdp10-dec-none-darc; do \
 		$(RM) "$(DESTDIR)$(BINDIR)/$$f"; \
 	done
 	$(RM) $(ALIASES)

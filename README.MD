@@ -6,10 +6,8 @@ builders, and simulator helper tools for the DAIMOS/PDP-10 toolchain.
 ## Tools
 
 - `p10run`: small PDP-6/KA10/KI10/KS10/KL10 SIMH bare-metal test runner.
-- `dxr2rim`: converts DAIMOS DXR V1 to PDP-6 RIM tape.
 - `mkdsk`: creates small PDP-6 DSK270 DBOOT V1 test bootsets.
 - `mkdt`: writes PDP-6 18-bit SIMH DECtape images.
-- `mkrim`: converts SIMH-style deposit text to PDP-6 executable RIM tape.
 - `mkstream`: wraps assembled standalone words as a Stage1 stream.
 - `mktap`: writes PDP-6 36-bit words as a SIMH magnetic-tape record.
 - `words2pt`: encodes octal 36-bit words as PDP-6 paper-tape bytes.
@@ -21,9 +19,10 @@ builders, and simulator helper tools for the DAIMOS/PDP-10 toolchain.
 The assembler itself lives in the DAS repository. Install DAS and these tools
 under the same `PDP10_PREFIX` when using the full testkit/toolchain flow.
 
-## Legacy Python Tool
-
-`mkrim.py` is retained for compatibility. The old Python bare runner has been removed; `p10run` is the sole PDP-10 execution/test runner.
+DXR conversion, including standard RIM10B and paper-tape output, is owned by
+DAS `dxrconvert`.  The older `dxr2rim`, `mkrim`, and Python `mkrim.py`
+frontends were removed after `p10run` moved to the DOBJ/DARC/DLINK -> DXR ->
+`dxrconvert` pipeline.
 
 ## Build And Install
 
