@@ -21,14 +21,13 @@
 
 #define P10RUN_VERSION "p10run-dobj-v1_20260814"
 #define PATHSZ 4096
-#define MAX_ITEMS 256
-#define MAX_LABELS 2048
 #define MAX_NAME 80
 #define MASK18 0777777UL
 
 struct string_list {
-    char *v[MAX_ITEMS];
+    char **v;
     int n;
+    int cap;
 };
 
 struct expectation {
@@ -37,8 +36,9 @@ struct expectation {
 };
 
 struct expect_list {
-    struct expectation v[MAX_ITEMS];
+    struct expectation *v;
     int n;
+    int cap;
 };
 
 struct label {
@@ -47,8 +47,9 @@ struct label {
 };
 
 struct label_list {
-    struct label v[MAX_LABELS];
+    struct label *v;
     int n;
+    int cap;
 };
 
 struct options {
@@ -91,6 +92,24 @@ static char *xstrdup(const char *s)
         die("out of memory");
     strcpy(p, s);
     return p;
+}
+
+static void *xrealloc(void *p, size_t n)
+{
+    void *q;
+    q = realloc(p, n);
+    if (q == NULL)
+        die("out of memory");
+    return q;
+}
+
+static int grow_capacity(int cap)
+{
+    if (cap == 0)
+        return 8;
+    if (cap > 16384)
+        die("too many arguments");
+    return cap * 2;
 }
 
 
@@ -174,8 +193,11 @@ static unsigned long parse_octal(const char *s)
 
 static void list_add(struct string_list *l, const char *s)
 {
-    if (l->n >= MAX_ITEMS)
-        die("too many arguments");
+    if (l->n == l->cap) {
+        l->cap = grow_capacity(l->cap);
+        l->v = (char **)xrealloc(l->v,
+                                (size_t)l->cap * sizeof(l->v[0]));
+    }
     l->v[l->n++] = xstrdup(s);
 }
 
@@ -183,8 +205,11 @@ static void expect_add(struct expect_list *l, const char *s)
 {
     const char *eq;
     size_t n;
-    if (l->n >= MAX_ITEMS)
-        die("too many expectations");
+    if (l->n == l->cap) {
+        l->cap = grow_capacity(l->cap);
+        l->v = (struct expectation *)xrealloc(
+            l->v, (size_t)l->cap * sizeof(l->v[0]));
+    }
     eq = strchr(s, '=');
     if (eq == NULL || eq == s)
         die("--expect requires LABEL=OCTAL");
@@ -195,6 +220,24 @@ static void expect_add(struct expect_list *l, const char *s)
     l->v[l->n].name[n] = 0;
     l->v[l->n].value = parse_octal(eq + 1);
     l->n++;
+}
+
+static void list_free(struct string_list *l)
+{
+    int i;
+    for (i = 0; i < l->n; i++)
+        free(l->v[i]);
+    free(l->v);
+}
+
+static void options_free(struct options *o)
+{
+    list_free(&o->gcc_extra);
+    list_free(&o->examine);
+    list_free(&o->set_cmd);
+    list_free(&o->ini);
+    list_free(&o->sources);
+    free(o->expects.v);
 }
 
 static void usage(void)
@@ -423,11 +466,14 @@ static void compile_source(const struct options *o, const char *gcc,
 {
     const char *dot;
     char march[64];
-    char *av[MAX_ITEMS + 16];
+    char **av;
     int ac;
     int i;
     object_path(obj, work, n, src);
     dot = strrchr(src, '.');
+    av = (char **)malloc((size_t)(o->gcc_extra.n + 16) * sizeof(av[0]));
+    if (av == NULL)
+        die("out of memory");
     ac = 0;
     if (dot != NULL && strcmp(dot, ".c") == 0) {
         copy_text(march, sizeof(march), "-march=");
@@ -451,8 +497,11 @@ static void compile_source(const struct options *o, const char *gcc,
         av[ac++] = (char *)src;
         av[ac] = NULL;
     }
-    if (run_wait(av, NULL, NULL, 30) != 0)
+    if (run_wait(av, NULL, NULL, 30) != 0) {
+        free(av);
         die_path("compile/assemble failed", src);
+    }
+    free(av);
 }
 
 static void find_libgcc(char *out, const char *gcc, const char *work)
@@ -477,10 +526,10 @@ static void find_libgcc(char *out, const char *gcc, const char *work)
 }
 
 static void link_objects(const char *dlink, const char *work, const char *name,
-                         char objects[][PATHSZ], int nobj, const char *libgcc,
+                         char **objects, int nobj, const char *libgcc,
                          char *dxr, char *map)
 {
-    char *av[MAX_ITEMS + 12];
+    char **av;
     int ac;
     int i;
     {
@@ -492,6 +541,9 @@ static void link_objects(const char *dlink, const char *work, const char *name,
         cat_text(leaf, sizeof(leaf), ".map");
         make_path2(map, PATHSZ, work, leaf);
     }
+    av = (char **)malloc((size_t)(nobj + 8) * sizeof(av[0]));
+    if (av == NULL)
+        die("out of memory");
     ac = 0;
     av[ac++] = (char *)dlink;
     av[ac++] = (char *)"-o";
@@ -502,8 +554,11 @@ static void link_objects(const char *dlink, const char *work, const char *name,
         av[ac++] = objects[i];
     av[ac++] = (char *)libgcc;
     av[ac] = NULL;
-    if (run_wait(av, NULL, NULL, 30) != 0)
+    if (run_wait(av, NULL, NULL, 30) != 0) {
+        free(av);
         die("link failed");
+    }
+    free(av);
 }
 
 static void read_map(const char *path, unsigned long base, struct label_list *l)
@@ -519,8 +574,11 @@ static void read_map(const char *path, unsigned long base, struct label_list *l)
     while (fgets(line, sizeof(line), f) != NULL) {
         if (sscanf(line, "%79s %lo", name, &v) != 2)
             continue;
-        if (l->n >= MAX_LABELS)
-            die("too many linker labels");
+        if (l->n == l->cap) {
+            l->cap = grow_capacity(l->cap);
+            l->v = (struct label *)xrealloc(
+                l->v, (size_t)l->cap * sizeof(l->v[0]));
+        }
         strcpy(l->v[l->n].name, name);
         l->v[l->n].value = base + v;
         l->n++;
@@ -830,7 +888,7 @@ int main(int argc, char **argv)
     char name[MAX_NAME];
     char gcc[PATHSZ], as[PATHSZ], dlink[PATHSZ], conv[PATHSZ], simh[PATHSZ];
     char libgcc[PATHSZ];
-    char objects[MAX_ITEMS][PATHSZ];
+    char **objects;
     char dxr[PATHSZ], map[PATHSZ], image[PATHSZ], runini[PATHSZ], log[PATHSZ];
     char labels_path[PATHSZ], report[PATHSZ];
     char local[PATHSZ], envsimh[PATHSZ];
@@ -842,6 +900,8 @@ int main(int argc, char **argv)
     char *output;
     char *simhav[3];
 
+    objects = NULL;
+    memset(&labels, 0, sizeof(labels));
     parse_args(&o, argc, argv);
     prefix = getenv("PDP10_PREFIX");
     if (prefix == NULL || *prefix == 0)
@@ -881,9 +941,15 @@ int main(int argc, char **argv)
     if (!path_executable(conv)) die_path("missing dxrconvert", conv);
     if (!path_executable(simh)) die_path("missing SIMH", simh);
 
+    objects = (char **)malloc((size_t)o.sources.n * sizeof(objects[0]));
+    if (objects == NULL)
+        die("out of memory");
     for (i = 0; i < o.sources.n; i++) {
-        if (!path_exists(o.sources.v[i])) die_path("source not found", o.sources.v[i]);
-        compile_source(&o, gcc, as, work, i + 1, o.sources.v[i], objects[i]);
+        char obj[PATHSZ];
+        if (!path_exists(o.sources.v[i]))
+            die_path("source not found", o.sources.v[i]);
+        compile_source(&o, gcc, as, work, i + 1, o.sources.v[i], obj);
+        objects[i] = xstrdup(obj);
     }
     find_libgcc(libgcc, gcc, work);
     link_objects(dlink, work, name, objects, o.sources.n, libgcc, dxr, map);
@@ -917,6 +983,11 @@ int main(int argc, char **argv)
     write_report(report, &o, simh, gcc, as, dlink, libgcc, start, entry,
                  simh_rc, failures, output);
     free(output);
+    for (i = 0; i < o.sources.n; i++)
+        free(objects[i]);
+    free(objects);
+    free(labels.v);
+    options_free(&o);
     if (failures != 0) {
         fprintf(stderr, "see report: %s\n", report);
         return 1;

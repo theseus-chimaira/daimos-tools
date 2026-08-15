@@ -58,6 +58,7 @@ test: dlink darc p10run
 	$(CC) $(CFLAGS) -std=c89 -I. -o tests/dobj-test tests/dobj-test.c dobj.c
 	./tests/dobj-test
 	./tests/p10run-c89-test.sh
+	./tests/p10run-functional-test.sh
 
 clean:
 	$(RM) $(CTOOLS) $(ALIASES) $(REMOVED_ALIASES) $(REMOVED_TOOLS) *.o tests/dobj-test tests/*.dobj tests/*.darc tests/*.dxr tests/*.map
