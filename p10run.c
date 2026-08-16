@@ -24,6 +24,13 @@
 #define MAX_NAME 80
 #define MASK18 0777777UL
 
+/* A PDP-10 word is 36 bits, so unsigned long is insufficient on ILP32 hosts.
+ * Keep the representation C89-compatible by storing two 18-bit halves. */
+struct p10_word {
+    unsigned long high;
+    unsigned long low;
+};
+
 struct string_list {
     char **v;
     int n;
@@ -32,7 +39,7 @@ struct string_list {
 
 struct expectation {
     char name[MAX_NAME];
-    unsigned long value;
+    struct p10_word value;
 };
 
 struct expect_list {
@@ -191,6 +198,30 @@ static unsigned long parse_octal(const char *s)
     return v;
 }
 
+static int parse_p10_word(const char *s, struct p10_word *word)
+{
+    struct p10_word value;
+    const unsigned char *p;
+    if (*s == 0)
+        return 0;
+    value.high = 0UL;
+    value.low = 0UL;
+    p = (const unsigned char *)s;
+    while (*p != 0) {
+        unsigned long digit;
+        if (*p < (unsigned char)'0' || *p > (unsigned char)'7')
+            return 0;
+        if ((value.high & 0700000UL) != 0UL)
+            return 0;
+        digit = (unsigned long)(*p - (unsigned char)'0');
+        value.high = ((value.high << 3) | (value.low >> 15)) & MASK18;
+        value.low = ((value.low << 3) | digit) & MASK18;
+        p++;
+    }
+    *word = value;
+    return 1;
+}
+
 static void list_add(struct string_list *l, const char *s)
 {
     if (l->n == l->cap) {
@@ -218,7 +249,8 @@ static void expect_add(struct expect_list *l, const char *s)
         die("expectation label too long");
     memcpy(l->v[l->n].name, s, n);
     l->v[l->n].name[n] = 0;
-    l->v[l->n].value = parse_octal(eq + 1);
+    if (!parse_p10_word(eq + 1, &l->v[l->n].value))
+        die("invalid 36-bit octal value");
     l->n++;
 }
 
@@ -719,8 +751,9 @@ static void write_run_script(const struct options *o, const char *path,
         unsigned long addr;
         if (!find_label(labels, o->expects.v[i].name, &addr))
             die_path("expected label not found", o->expects.v[i].name);
-        fprintf(f, "echo __P10RUN_EXPECT__ %s %lo %012lo\nexamine %lo\n",
-                o->expects.v[i].name, addr, o->expects.v[i].value, addr);
+        fprintf(f, "echo __P10RUN_EXPECT__ %s %lo %06lo%06lo\nexamine %lo\n",
+                o->expects.v[i].name, addr, o->expects.v[i].value.high,
+                o->expects.v[i].value.low, addr);
     }
     for (i = 0; i < o->examine.n; i++) {
         unsigned long addr;
@@ -776,7 +809,7 @@ static int contains_ci(const char *s, const char *needle)
 }
 
 static int parse_examine_after(const char *text, const char *marker,
-                               const char *name, unsigned long *got)
+                               const char *name, struct p10_word *got)
 {
     char key[160];
     const char *p;
@@ -796,19 +829,17 @@ static int parse_examine_after(const char *text, const char *marker,
         char line[256];
         size_t n;
         char *tok;
-        unsigned long last;
+        struct p10_word last;
         int have;
         end = strchr(p, '\n');
         n = end == NULL ? strlen(p) : (size_t)(end - p);
         if (n >= sizeof(line)) n = sizeof(line) - 1U;
         memcpy(line, p, n); line[n] = 0;
-        last = 0UL; have = 0;
+        last.high = 0UL; last.low = 0UL; have = 0;
         tok = strtok(line, " \t:=");
         while (tok != NULL) {
-            char *e;
-            unsigned long v;
-            v = strtoul(tok, &e, 8);
-            if (*tok != 0 && *e == 0) { last = v; have = 1; }
+            struct p10_word value;
+            if (parse_p10_word(tok, &value)) { last = value; have = 1; }
             tok = strtok(NULL, " \t:=");
         }
         if (have) { *got = last; return 1; }
@@ -838,17 +869,18 @@ static int evaluate(const struct options *o, const char *text)
         failures++;
     }
     for (i = 0; i < o->expects.n; i++) {
-        unsigned long got;
+        struct p10_word got;
         if (!parse_examine_after(text, "__P10RUN_EXPECT__",
                                  o->expects.v[i].name, &got)) {
             fprintf(stderr, "FAIL: %s: no readable examine output\n",
                     o->expects.v[i].name);
             failures++;
-        } else if ((got & 0777777777777UL) !=
-                   (o->expects.v[i].value & 0777777777777UL)) {
-            fprintf(stderr, "FAIL: %s: got %012lo expected %012lo\n",
-                    o->expects.v[i].name, got & 0777777777777UL,
-                    o->expects.v[i].value & 0777777777777UL);
+        } else if (got.high != o->expects.v[i].value.high ||
+                   got.low != o->expects.v[i].value.low) {
+            fprintf(stderr,
+                    "FAIL: %s: got %06lo%06lo expected %06lo%06lo\n",
+                    o->expects.v[i].name, got.high, got.low,
+                    o->expects.v[i].value.high, o->expects.v[i].value.low);
             failures++;
         }
     }
