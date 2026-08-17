@@ -10,22 +10,14 @@ CC ?= cc
 CFLAGS ?= -Wall -Wextra -O2 -std=c99
 
 CTOOLS = mkdsk mkdt mkstream mktap words2pt dlink darc p10run pdp10-objdump
-SCRIPTS =
 ALIASES = pdp10-dec-none-darc pdp10-dec-none-objdump
-REMOVED_ALIASES = pdp10-dec-none-ar pdp10-dec-none-ranlib
-REMOVED_TOOLS = dxr2rim mkrim mkrim.py p10bare p10bare.py
 SIMH_INIS = simh/pdp6.ini simh/pdp10-ka.ini simh/pdp10-ki.ini \
 	simh/pdp10-kl.ini simh/pdp10-ks.ini
 SIMH_NAMES = pdp6.ini pdp10-ka.ini pdp10-ki.ini pdp10-kl.ini pdp10-ks.ini
 
-.PHONY: all clean install uninstall help test remove-legacy-aliases
+.PHONY: all clean install uninstall help
 
-all: remove-legacy-aliases $(CTOOLS) $(ALIASES)
-
-remove-legacy-aliases:
-	@for f in $(REMOVED_ALIASES); do \
-		test ! -L "$$f" || $(RM) "$$f"; \
-	done
+all: $(CTOOLS) $(ALIASES)
 
 mkdsk: mkdsk.c
 	$(CC) $(CFLAGS) -o $@ mkdsk.c
@@ -43,13 +35,13 @@ words2pt: words2pt.c
 	$(CC) $(CFLAGS) -o $@ words2pt.c
 
 dlink: dlink.c dobj.c dobj.h
-	$(CC) $(CFLAGS) -std=c89 -o $@ dlink.c dobj.c
+	$(CC) $(CFLAGS) -o $@ dlink.c dobj.c
 
 darc: darc.c dobj.c dobj.h
-	$(CC) $(CFLAGS) -std=c89 -o $@ darc.c dobj.c
+	$(CC) $(CFLAGS) -o $@ darc.c dobj.c
 
 p10run: p10run.c
-	$(CC) $(CFLAGS) -std=c89 -o $@ p10run.c
+	$(CC) $(CFLAGS) -o $@ p10run.c
 
 pdp10-objdump: pdp10-objdump.c dobj.c dobj.h
 	$(CC) $(CFLAGS) -o $@ pdp10-objdump.c dobj.c
@@ -69,16 +61,11 @@ test: dlink darc p10run pdp10-objdump
 	./tests/p10run-functional-test.sh
 
 clean:
-	$(RM) $(CTOOLS) $(ALIASES) $(REMOVED_ALIASES) $(REMOVED_TOOLS) *.o tests/dobj-test tests/pdp10-objdump-mk tests/*.dobj tests/*.darc tests/*.dxr tests/*.map
-	$(RM) -r __pycache__ legacy/__pycache__
+	$(RM) $(CTOOLS) $(ALIASES) *.o tests/dobj-test tests/pdp10-objdump-mk tests/*.dobj tests/*.darc tests/*.dxr tests/*.map
 
 install: all
 	$(INSTALL) -d $(DESTDIR)$(BINDIR) $(DESTDIR)$(DATADIR)/simh
-	@for f in $(REMOVED_TOOLS); do $(RM) "$(DESTDIR)$(BINDIR)/$$f"; done
 	$(INSTALL) -m 755 $(CTOOLS) $(SCRIPTS) $(DESTDIR)$(BINDIR)/
-	@for f in $(REMOVED_ALIASES); do \
-		test ! -L "$(DESTDIR)$(BINDIR)/$$f" || $(RM) "$(DESTDIR)$(BINDIR)/$$f"; \
-	done
 	$(LN_S) darc $(DESTDIR)$(BINDIR)/pdp10-dec-none-darc
 	$(LN_S) pdp10-objdump $(DESTDIR)$(BINDIR)/pdp10-dec-none-objdump
 	$(INSTALL) -m 644 $(SIMH_INIS) $(DESTDIR)$(DATADIR)/simh/

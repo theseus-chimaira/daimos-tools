@@ -1,13 +1,9 @@
-__pycache__/
-*.pyc
 *.o
 mkdsk
 mkdt
 mkstream
 mktap
 words2pt
-pdp10-dec-none-ar
-pdp10-dec-none-ranlib
 dlink
 darc
 p10run
@@ -17,3 +13,4 @@ tests/*.dobj
 tests/*.darc
 tests/*.dxr
 tests/*.map
+pdp10-objdump
