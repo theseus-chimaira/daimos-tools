@@ -20,16 +20,17 @@
 #define SECTORS 02000U
 #define SCAN_LIMIT 0200U
 #define MAX_MEMBERS 4U
-#define DB0_BAD_RUNS 020U
-#define DB1_BAD_RUNS 0176U
+#define DB0_BAD_RUNS 040U
+#define DB1_BAD_RUNS 0400U
+#define MAX_BAD_RUNS (DB0_BAD_RUNS + DB1_BAD_RUNS)
+#define BAD_RUN_MAX_LENGTH 0400U
 
+/* DB0 RH: VERSION3 | DB0_RUN_COUNT6 | DB1_RUN_COUNT9. */
 #define MAGIC_DB0 0444220U
-#define MAGIC_DB1 0444221U
 #define MAGIC_DBX 0444270U
 #define MAGIC_DBC 0444243U
 #define DBOOTX_VERSION 0U
 #define DBOOT_VERSION 1U
-#define DB0_F_HAS_DB1 000004U
 #define DBX_F_CHECKSUM 000001U
 #define DBX_F_COMPLETE_REQ 000002U
 #define DBX_F_COMPACT 000010U
@@ -44,7 +45,7 @@ struct bad_run {
 };
 
 struct member {
-        struct bad_run bad[0177];
+        struct bad_run bad[MAX_BAD_RUNS];
         unsigned bad_count;
         unsigned db0_sector;
         unsigned db1_sector;
@@ -76,10 +77,32 @@ static unsigned long long member_word(unsigned mask, unsigned index,
             (unsigned long long)(flags & 07777U));
 }
 
-static unsigned long long bad_word(unsigned start, unsigned count)
+/* 18-bit run: START_SECTOR10 | RUN_LENGTH_MINUS_ONE8. */
+static unsigned bad_half(unsigned start, unsigned count)
 {
-        return mask36((((unsigned long long)(start & HALF_MASK)) << 18) |
-            (((unsigned long long)((count - 1U) & 07777U)) << 6) | 1U);
+        return ((start & 01777U) << 8) | ((count - 1U) & 0377U);
+}
+
+static unsigned long long db0_header(unsigned db0_count, unsigned db1_count)
+{
+        return mask36((((unsigned long long)MAGIC_DB0) << 18) |
+            (((unsigned long long)(DBOOT_VERSION & 07U)) << 15) |
+            (((unsigned long long)(db0_count & 077U)) << 9) |
+            (unsigned long long)(db1_count & 0777U));
+}
+
+static void put_bad_halves(unsigned long long *words, unsigned word_offset,
+    const struct bad_run *bad, unsigned count)
+{
+        unsigned i;
+        for (i = 0; i < count; i++) {
+                unsigned half = bad_half(bad[i].start, bad[i].count);
+                unsigned wi = word_offset + (i >> 1);
+                if ((i & 1U) == 0)
+                        words[wi] |= (unsigned long long)half << 18;
+                else
+                        words[wi] |= (unsigned long long)half;
+        }
 }
 
 static int contains_bad(struct member *m, unsigned sector)
@@ -139,13 +162,23 @@ static void zero_sector(unsigned long long *words)
 
 static void add_bad(struct member *m, unsigned start, unsigned count)
 {
-        if (m->bad_count >= 0177U) {
-                fprintf(stderr, "mkdsk: too many bad runs\n");
-                exit(1);
+        while (count != 0) {
+                unsigned chunk = count > BAD_RUN_MAX_LENGTH ?
+                    BAD_RUN_MAX_LENGTH : count;
+                if (start >= SECTORS || chunk > SECTORS - start) {
+                        fprintf(stderr, "mkdsk: bad run outside disk\n");
+                        exit(1);
+                }
+                if (m->bad_count >= MAX_BAD_RUNS) {
+                        fprintf(stderr, "mkdsk: too many bad runs\n");
+                        exit(1);
+                }
+                m->bad[m->bad_count].start = start;
+                m->bad[m->bad_count].count = chunk;
+                m->bad_count++;
+                start += chunk;
+                count -= chunk;
         }
-        m->bad[m->bad_count].start = start;
-        m->bad[m->bad_count].count = count;
-        m->bad_count++;
 }
 
 static void init_bad_runs(struct member *members, unsigned n, const char *mode)
@@ -162,8 +195,9 @@ static void init_bad_runs(struct member *members, unsigned n, const char *mode)
         }
         if (strcmp(mode, "db1") == 0) {
                 for (u = 0; u < n; u++) {
-                        add_bad(&members[u], 5U + u, 1);
-                        for (i = 1; i < 022U; i++)
+                        add_bad(&members[u], 1U, 1);
+                        add_bad(&members[u], 3U, 1);
+                        for (i = 1; i < 0202U; i++)
                                 add_bad(&members[u], 0200U + i * 2U + u, 1);
                 }
                 return;
@@ -174,31 +208,28 @@ static void init_bad_runs(struct member *members, unsigned n, const char *mode)
 
 static void make_db0(unsigned long long *words, struct member *m)
 {
-        unsigned i, count = m->bad_count;
-        unsigned flags = (count > DB0_BAD_RUNS) ? DB0_F_HAS_DB1 : 0;
+        unsigned db0_count = m->bad_count;
+        unsigned db1_count = 0;
         zero_sector(words);
-        if (count > DB0_BAD_RUNS)
-                count = DB0_BAD_RUNS;
-        words[0] = six_header(MAGIC_DB0, DBOOT_VERSION, count, flags);
-        if (flags)
+        if (db0_count > DB0_BAD_RUNS) {
+                db1_count = db0_count - DB0_BAD_RUNS;
+                db0_count = DB0_BAD_RUNS;
+        }
+        words[0] = db0_header(db0_count, db1_count);
+        if (db1_count != 0)
                 words[021] = m->db1_sector;
-        for (i = 0; i < count; i++)
-                words[1 + i] = bad_word(m->bad[i].start, m->bad[i].count);
+        put_bad_halves(words, 1, m->bad, db0_count);
 }
 
 static void make_db1(unsigned long long *words, struct member *m)
 {
-        unsigned i, count = m->bad_count - DB0_BAD_RUNS;
+        unsigned count = m->bad_count - DB0_BAD_RUNS;
         if (count > DB1_BAD_RUNS) {
                 fprintf(stderr, "mkdsk: DB1 overflow beyond one sector\n");
                 exit(1);
         }
         zero_sector(words);
-        words[0] = six_header(MAGIC_DB1, DBOOT_VERSION, count, 0);
-        words[1] = 0;
-        for (i = 0; i < count; i++)
-                words[2 + i] = bad_word(m->bad[DB0_BAD_RUNS + i].start,
-                    m->bad[DB0_BAD_RUNS + i].count);
+        put_bad_halves(words, 0, m->bad + DB0_BAD_RUNS, count);
 }
 
 static void make_dbx(unsigned long long *words, unsigned unit, unsigned n,
@@ -328,7 +359,8 @@ int main(int argc, char **argv)
                         members[u].db1_sector = members[u].bad_count > DB0_BAD_RUNS ?
                             next_good(&members[u], members[u].db0_sector + 1) : 0;
                         members[u].dbx_sector = next_good(&members[u],
-                            members[u].db0_sector + 1 + (members[u].db1_sector ? 1 : 0));
+                            members[u].db1_sector ? members[u].db1_sector + 1 :
+                            members[u].db0_sector + 1);
                         members[u].boot_start = next_good(&members[u],
                             members[u].dbx_sector + 1);
                 }
