@@ -232,15 +232,14 @@ static void make_db1(unsigned long long *words, struct member *m)
         put_bad_halves(words, 0, m->bad + DB0_BAD_RUNS, count);
 }
 
-static void make_dbx(unsigned long long *words, unsigned unit, unsigned n,
-    int compact)
+static void make_dbx(unsigned long long *words, unsigned mask,
+    unsigned index, unsigned count, int compact)
 {
-        unsigned mask = (1U << n) - 1U;
         zero_sector(words);
         words[0] = six_header(compact ? MAGIC_DBC : MAGIC_DBX,
             DBOOTX_VERSION, 0, 0);
         words[2] = 0;
-        words[5] = member_word(mask, unit, n, 0);
+        words[5] = member_word(mask, index, count, 0);
 }
 
 static unsigned long long parse_word(const char *s)
@@ -307,14 +306,27 @@ static unsigned long long *read_payload(const char *path, unsigned *countp)
 static void usage(void)
 {
         fprintf(stderr,
-            "usage: mkdsk -n members -m clean|db0|db1|bad -p words -o dir\n");
+            "usage: mkdsk -n members [-M member-mask] "
+            "-m clean|db0|db1|bad -p words -o dir\n");
         exit(2);
+}
+
+static unsigned popcount4(unsigned mask)
+{
+        unsigned count = 0;
+        mask &= 017U;
+        while (mask != 0) {
+                count += mask & 1U;
+                mask >>= 1;
+        }
+        return count;
 }
 
 int main(int argc, char **argv)
 {
         const char *mode = NULL, *payload_path = NULL, *outdir = NULL;
-        unsigned n = 0, payload_count, logical_sectors, u, logical;
+        unsigned n = 0, member_mask = 0, payload_count, logical_sectors;
+        unsigned logical_index[MAX_MEMBERS], u, logical;
         struct member members[MAX_MEMBERS];
         unsigned long long *payload;
         FILE *files[MAX_MEMBERS];
@@ -326,6 +338,8 @@ int main(int argc, char **argv)
         for (i = 1; i < argc; i++) {
                 if (strcmp(argv[i], "-n") == 0 && i + 1 < argc)
                         n = (unsigned)strtoul(argv[++i], NULL, 0);
+                else if (strcmp(argv[i], "-M") == 0 && i + 1 < argc)
+                        member_mask = (unsigned)strtoul(argv[++i], NULL, 0);
                 else if (strcmp(argv[i], "-m") == 0 && i + 1 < argc)
                         mode = argv[++i];
                 else if (strcmp(argv[i], "-p") == 0 && i + 1 < argc)
@@ -338,6 +352,17 @@ int main(int argc, char **argv)
         if (n < 1 || n > MAX_MEMBERS || mode == NULL ||
             payload_path == NULL || outdir == NULL)
                 usage();
+        if (member_mask == 0)
+                member_mask = (1U << n) - 1U;
+        if ((member_mask & ~017U) != 0 || popcount4(member_mask) != n)
+                usage();
+        {
+                unsigned index, slot = 0;
+                for (index = 0; index < MAX_MEMBERS; index++) {
+                        if ((member_mask & (1U << index)) != 0)
+                                logical_index[slot++] = index;
+                }
+        }
 
         memset(members, 0, sizeof(members));
         init_bad_runs(members, n, mode);
@@ -384,7 +409,7 @@ int main(int argc, char **argv)
         }
 
         for (u = 0; u < n; u++) {
-                make_dbx(sector, u, n, compact);
+                make_dbx(sector, member_mask, logical_index[u], n, compact);
                 write_sector(files[u], members[u].dbx_sector, sector);
                 if (!compact) {
                         make_db0(sector, &members[u]);
