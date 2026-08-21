@@ -121,9 +121,11 @@ static void dump_relocs(const struct dobj_object *obj)
         r = &obj->relocs[i];
         printf("%s+%06lo type=%d ", section_name(r->loc_sec),
                r->offset & HALF_MASK, r->type);
-        if (r->type == DOBJ_RELOC_LOCAL_RH18)
+        if (r->type == DOBJ_RELOC_LOCAL_RH18 ||
+            r->type == DOBJ_RELOC_LOCAL_LH18)
             printf("target=%s", section_name(r->target_sec));
-        else if (r->type == DOBJ_RELOC_SYMBOL_RH18 &&
+        else if ((r->type == DOBJ_RELOC_SYMBOL_RH18 ||
+                  r->type == DOBJ_RELOC_SYMBOL_LH18) &&
                  r->symbol > 0UL && r->symbol <= obj->symbol_count)
             printf("symbol=%s", obj->symbols[r->symbol - 1UL].name);
         else

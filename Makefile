@@ -2,6 +2,7 @@ PREFIX ?= /usr/local
 PDP10_PREFIX ?= $(PREFIX)
 BINDIR ?= $(PDP10_PREFIX)/bin
 DATADIR ?= $(PDP10_PREFIX)/share/pdp10-tools
+INCLUDEDIR ?= $(PDP10_PREFIX)/include
 
 INSTALL ?= install
 LN_S ?= ln -sf
@@ -64,11 +65,12 @@ clean:
 	$(RM) $(CTOOLS) $(ALIASES) *.o tests/dobj-test tests/pdp10-objdump-mk tests/*.dobj tests/*.darc tests/*.dxr tests/*.map
 
 install: all
-	$(INSTALL) -d $(DESTDIR)$(BINDIR) $(DESTDIR)$(DATADIR)/simh
+	$(INSTALL) -d $(DESTDIR)$(BINDIR) $(DESTDIR)$(DATADIR)/simh $(DESTDIR)$(INCLUDEDIR)
 	$(INSTALL) -m 755 $(CTOOLS) $(SCRIPTS) $(DESTDIR)$(BINDIR)/
 	$(LN_S) darc $(DESTDIR)$(BINDIR)/pdp10-dec-none-darc
 	$(LN_S) pdp10-objdump $(DESTDIR)$(BINDIR)/pdp10-dec-none-objdump
 	$(INSTALL) -m 644 $(SIMH_INIS) $(DESTDIR)$(DATADIR)/simh/
+	$(INSTALL) -m 644 pdp10-sixbit.h $(DESTDIR)$(INCLUDEDIR)/
 	@echo "Installed PDP-10 compatibility tools to $(DESTDIR)$(BINDIR)"
 
 uninstall:

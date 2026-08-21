@@ -28,6 +28,7 @@ struct global_def {
 };
 
 struct linker {
+    unsigned long image_base;
     struct link_object *objects;
     int object_count;
     int object_cap;
@@ -257,12 +258,18 @@ static int layout(struct linker *l, unsigned long *text_words,
     return 0;
 }
 
-static unsigned long section_base(const struct link_object *o, int sec)
+static unsigned long section_offset(const struct link_object *o, int sec)
 {
     if (sec == DOBJ_SEC_TEXT) return o->text_base;
     if (sec == DOBJ_SEC_DATA) return o->data_base;
     if (sec == DOBJ_SEC_BSS) return o->bss_base;
     return 0UL;
+}
+
+static unsigned long section_base(const struct linker *l,
+                                  const struct link_object *o, int sec)
+{
+    return l->image_base + section_offset(o, sec);
 }
 
 static int symbol_address(struct linker *l, int def_index,
@@ -284,7 +291,7 @@ static int symbol_address(struct linker *l, int def_index,
     if (s->sec < DOBJ_SEC_TEXT || s->sec > DOBJ_SEC_BSS ||
         s->value.lh != 0UL)
         return -1;
-    *addr = section_base(o, s->sec) + s->value.rh;
+    *addr = section_base(l, o, s->sec) + s->value.rh;
     *relative = 1;
     return *addr <= HALF_MASK ? 0 : -1;
 }
@@ -330,12 +337,14 @@ static int apply_relocs(struct linker *l, struct dobj_word *image,
                 fprintf(stderr, "dlink: relocation addend is outside DOBJ1 RH18 range\n");
                 return -1;
             }
-            if (r->type == DOBJ_RELOC_LOCAL_RH18) {
+            if (r->type == DOBJ_RELOC_LOCAL_RH18 ||
+                r->type == DOBJ_RELOC_LOCAL_LH18) {
                 if (r->target_sec < DOBJ_SEC_TEXT || r->target_sec > DOBJ_SEC_BSS)
                     return -1;
-                target = section_base(lo, r->target_sec);
-                relative = 1;
-            } else if (r->type == DOBJ_RELOC_SYMBOL_RH18) {
+                target = section_base(l, lo, r->target_sec);
+                relative = l->image_base == 0UL;
+            } else if (r->type == DOBJ_RELOC_SYMBOL_RH18 ||
+                       r->type == DOBJ_RELOC_SYMBOL_LH18) {
                 int di;
                 struct dobj_symbol *u;
                 if (r->symbol == 0UL || r->symbol > lo->obj.symbol_count)
@@ -344,6 +353,8 @@ static int apply_relocs(struct linker *l, struct dobj_word *image,
                 di = find_def(l, u->name);
                 if (di < 0 || symbol_address(l, di, &target, &relative) != 0)
                     return -1;
+                if (l->image_base != 0UL && relative)
+                    relative = 0;
             } else {
                 fprintf(stderr, "dlink: unsupported relocation type\n");
                 return -1;
@@ -352,9 +363,14 @@ static int apply_relocs(struct linker *l, struct dobj_word *image,
                 fprintf(stderr, "dlink: RH18 relocation overflow\n");
                 return -1;
             }
-            image[loc].rh = (unsigned long)((long)target + add) & HALF_MASK;
-            if (relative)
-                set_reloc_bit(relmap, loc);
+            if (r->type == DOBJ_RELOC_LOCAL_LH18 ||
+                r->type == DOBJ_RELOC_SYMBOL_LH18) {
+                image[loc].lh = (unsigned long)((long)target + add) & HALF_MASK;
+            } else {
+                image[loc].rh = (unsigned long)((long)target + add) & HALF_MASK;
+                if (relative)
+                    set_reloc_bit(relmap, loc);
+            }
         }
     }
     return 0;
@@ -446,6 +462,62 @@ bad:
     fclose(f); remove(name); free(image); free(relmap); return -1;
 }
 
+static int add_abs_map(struct linker *l, const char *name)
+{
+    FILE *f;
+    struct dobj_object obj;
+    char sym[DOBJ_NAME_MAX + 1];
+    unsigned long value;
+    unsigned long cap;
+
+    memset(&obj, 0, sizeof(obj));
+    cap = 0UL;
+    f = fopen(name, "r");
+    if (f == NULL) {
+        perror(name);
+        return -1;
+    }
+    while (fscanf(f, "%63s %lo", sym, &value) == 2) {
+        struct dobj_symbol *nv;
+        if (value > HALF_MASK) {
+            fprintf(stderr, "dlink: absolute map symbol out of range: %s\n", sym);
+            fclose(f);
+            dobj_free(&obj);
+            return -1;
+        }
+        if (obj.symbol_count == cap) {
+            unsigned long ncap = cap == 0UL ? 32UL : cap * 2UL;
+            nv = (struct dobj_symbol *)realloc(obj.symbols,
+                    (size_t)ncap * sizeof(*nv));
+            if (nv == NULL) {
+                fclose(f);
+                dobj_free(&obj);
+                return -1;
+            }
+            obj.symbols = nv;
+            cap = ncap;
+        }
+        memset(&obj.symbols[obj.symbol_count], 0,
+               sizeof(obj.symbols[obj.symbol_count]));
+        strcpy(obj.symbols[obj.symbol_count].name, sym);
+        obj.symbols[obj.symbol_count].kind = DOBJ_SYM_DEF;
+        obj.symbols[obj.symbol_count].sec = DOBJ_SEC_ABS;
+        obj.symbols[obj.symbol_count].value.rh = value;
+        obj.symbol_count++;
+    }
+    if (ferror(f)) {
+        fclose(f);
+        dobj_free(&obj);
+        return -1;
+    }
+    fclose(f);
+    if (add_object(l, &obj) != 0) {
+        dobj_free(&obj);
+        return -1;
+    }
+    return 0;
+}
+
 static void cleanup(struct linker *l)
 {
     int i;
@@ -463,7 +535,7 @@ static void cleanup(struct linker *l)
 
 static void usage(void)
 {
-    fprintf(stderr, "usage: dlink -o out.dxr [-M out.map] input.dobj|library.darc ...\n");
+    fprintf(stderr, "usage: dlink -o out.dxr [-M out.map] [-b octal] [-A map] input.dobj|library.darc ...\n");
 }
 
 int main(int argc, char **argv)
@@ -471,6 +543,8 @@ int main(int argc, char **argv)
     struct linker l;
     const char *out;
     const char *map;
+    const char *abs_maps[32];
+    int abs_map_count;
     int i;
     int first;
     int rc;
@@ -478,6 +552,8 @@ int main(int argc, char **argv)
     memset(&l, 0, sizeof(l));
     out = NULL;
     map = NULL;
+    abs_map_count = 0;
+    l.image_base = 0UL;
     first = 1;
     while (first < argc && argv[first][0] == '-') {
         if (strcmp(argv[first], "-o") == 0 && first + 1 < argc) {
@@ -486,6 +562,16 @@ int main(int argc, char **argv)
         } else if (strcmp(argv[first], "-M") == 0 && first + 1 < argc) {
             map = argv[first + 1];
             first += 2;
+        } else if (strcmp(argv[first], "-b") == 0 && first + 1 < argc) {
+            char *endp;
+            unsigned long v = strtoul(argv[first + 1], &endp, 8);
+            if (*endp != '\0' || v > HALF_MASK) { usage(); return 1; }
+            l.image_base = v;
+            first += 2;
+        } else if (strcmp(argv[first], "-A") == 0 && first + 1 < argc) {
+            if (abs_map_count >= 32) { usage(); return 1; }
+            abs_maps[abs_map_count++] = argv[first + 1];
+            first += 2;
         } else {
             usage();
             return 1;
@@ -493,6 +579,8 @@ int main(int argc, char **argv)
     }
     if (out == NULL || first >= argc) { usage(); return 1; }
     rc = 1;
+    for (i = 0; i < abs_map_count; i++)
+        if (add_abs_map(&l, abs_maps[i]) != 0) goto done;
     for (i = first; i < argc; i++) {
         FILE *f;
         f = fopen(argv[i], "rb");
