@@ -308,8 +308,27 @@ static void set_reloc_bit(struct dobj_word *map, unsigned long off)
         map[wi].rh |= 1UL << (35UL - bit);
 }
 
+
+static void set_mres_reloc(struct dobj_word *map, unsigned long off,
+                           unsigned long code)
+{
+    unsigned long wi;
+    unsigned long slot;
+    unsigned long shift;
+
+    wi = off / 18UL;
+    slot = off % 18UL;
+    if (slot < 9UL) {
+        shift = 16UL - slot * 2UL;
+        map[wi].lh |= (code & 3UL) << shift;
+    } else {
+        shift = 16UL - (slot - 9UL) * 2UL;
+        map[wi].rh |= (code & 3UL) << shift;
+    }
+}
+
 static int apply_relocs(struct linker *l, struct dobj_word *image,
-                        struct dobj_word *relmap)
+                        struct dobj_word *relmap, struct dobj_word *mresmap)
 {
     int oi;
     for (oi = 0; oi < l->object_count; oi++) {
@@ -366,10 +385,16 @@ static int apply_relocs(struct linker *l, struct dobj_word *image,
             if (r->type == DOBJ_RELOC_LOCAL_LH18 ||
                 r->type == DOBJ_RELOC_SYMBOL_LH18) {
                 image[loc].lh = (unsigned long)((long)target + add) & HALF_MASK;
+                if (relative && mresmap != NULL)
+                    set_mres_reloc(mresmap, loc, 2UL);
             } else {
                 image[loc].rh = (unsigned long)((long)target + add) & HALF_MASK;
-                if (relative)
-                    set_reloc_bit(relmap, loc);
+                if (relative) {
+                    if (relmap != NULL)
+                        set_reloc_bit(relmap, loc);
+                    if (mresmap != NULL)
+                        set_mres_reloc(mresmap, loc, 1UL);
+                }
             }
         }
     }
@@ -429,7 +454,7 @@ static int write_dxr(const char *name, struct linker *l)
         for (j = 0UL; j < l->objects[i].obj.data_words; j++)
             image[l->objects[i].data_base + j] = l->objects[i].obj.data[j];
     }
-    if (apply_relocs(l, image, relmap) != 0) {
+    if (apply_relocs(l, image, relmap, NULL) != 0) {
         free(image); free(relmap); return -1;
     }
     entry = 0UL;
@@ -460,6 +485,114 @@ static int write_dxr(const char *name, struct linker *l)
     free(image); free(relmap); return 0;
 bad:
     fclose(f); remove(name); free(image); free(relmap); return -1;
+}
+
+static int write_mres_object(const char *name, const char *package_symbol,
+                             const char **exports, int export_count,
+                             struct linker *l)
+{
+    unsigned long tw, dw, bw, iw, rw, ew, pw;
+    struct dobj_word *image;
+    struct dobj_word *mresmap;
+    struct dobj_object out;
+    unsigned long i;
+    FILE *f;
+    int rc;
+
+    if (l->image_base != 0UL) {
+        fprintf(stderr, "dlink: MRES output requires link base 0\n");
+        return -1;
+    }
+    if (package_symbol == NULL || package_symbol[0] == '\0' ||
+        strlen(package_symbol) > DOBJ_NAME_MAX) {
+        fprintf(stderr, "dlink: invalid MRES package symbol\n");
+        return -1;
+    }
+    if (layout(l, &tw, &dw, &bw) != 0)
+        return -1;
+    iw = tw + dw;
+    rw = (iw + 17UL) / 18UL;
+    ew = ((unsigned long)export_count + 1UL) / 2UL;
+    pw = 3UL + ew + iw + rw;
+    image = (struct dobj_word *)calloc((size_t)iw, sizeof(*image));
+    mresmap = (struct dobj_word *)calloc((size_t)rw, sizeof(*mresmap));
+    if ((iw != 0UL && image == NULL) || (rw != 0UL && mresmap == NULL)) {
+        free(image);
+        free(mresmap);
+        return -1;
+    }
+    for (i = 0UL; i < (unsigned long)l->object_count; i++) {
+        unsigned long j;
+        struct link_object *lo = &l->objects[i];
+        for (j = 0UL; j < lo->obj.text_words; j++)
+            image[lo->text_base + j] = lo->obj.text[j];
+        for (j = 0UL; j < lo->obj.data_words; j++)
+            image[lo->data_base + j] = lo->obj.data[j];
+    }
+    if (apply_relocs(l, image, NULL, mresmap) != 0) {
+        free(image);
+        free(mresmap);
+        return -1;
+    }
+    memset(&out, 0, sizeof(out));
+    out.data_words = pw;
+    out.data = (struct dobj_word *)calloc((size_t)pw, sizeof(*out.data));
+    out.symbol_count = 1UL;
+    out.symbols = (struct dobj_symbol *)calloc(1U, sizeof(*out.symbols));
+    if (out.data == NULL || out.symbols == NULL) {
+        free(image);
+        free(mresmap);
+        dobj_free(&out);
+        return -1;
+    }
+    out.data[0] = sixbit_word("MRES1 ");
+    out.data[1] = dobj_word_halves(iw, bw);
+    out.data[2] = dobj_word_halves(rw, (unsigned long)export_count);
+    for (i = 0UL; i < (unsigned long)export_count; i++) {
+        int di;
+        int relative;
+        unsigned long addr;
+        unsigned long wi;
+        di = find_def(l, exports[i]);
+        if (di < 0 || symbol_address(l, di, &addr, &relative) != 0 ||
+            !relative || addr >= iw + bw) {
+            fprintf(stderr, "dlink: invalid MRES export: %s\n", exports[i]);
+            free(image);
+            free(mresmap);
+            dobj_free(&out);
+            return -1;
+        }
+        wi = 3UL + i / 2UL;
+        if ((i & 1UL) == 0UL)
+            out.data[wi].lh = addr;
+        else
+            out.data[wi].rh = addr;
+    }
+    for (i = 0UL; i < iw; i++)
+        out.data[3UL + ew + i] = image[i];
+    for (i = 0UL; i < rw; i++)
+        out.data[3UL + ew + iw + i] = mresmap[i];
+    strcpy(out.symbols[0].name, package_symbol);
+    out.symbols[0].kind = DOBJ_SYM_DEF;
+    out.symbols[0].sec = DOBJ_SEC_DATA;
+    out.symbols[0].value = dobj_word_halves(0UL, 0UL);
+    f = fopen(name, "wb");
+    if (f == NULL) {
+        perror(name);
+        free(image);
+        free(mresmap);
+        dobj_free(&out);
+        return -1;
+    }
+    rc = dobj_write(f, &out);
+    if (fclose(f) != 0)
+        rc = -1;
+    if (rc != 0)
+        remove(name);
+    free(image);
+    free(mresmap);
+    dobj_free(&out);
+    return rc;
 }
 
 static int add_abs_map(struct linker *l, const char *name)
@@ -535,7 +668,7 @@ static void cleanup(struct linker *l)
 
 static void usage(void)
 {
-    fprintf(stderr, "usage: dlink -o out.dxr [-M out.map] [-b octal] [-A map] input.dobj|library.darc ...\n");
+    fprintf(stderr, "usage: dlink -o out.dxr [-M out.map] [-b octal] [-A map] [-R out.dobj -N symbol [-X export] ...] input.dobj|library.darc ...\n");
 }
 
 int main(int argc, char **argv)
@@ -544,7 +677,11 @@ int main(int argc, char **argv)
     const char *out;
     const char *map;
     const char *abs_maps[32];
+    const char *mres_out;
+    const char *mres_symbol;
+    const char *mres_exports[32];
     int abs_map_count;
+    int mres_export_count;
     int i;
     int first;
     int rc;
@@ -553,6 +690,9 @@ int main(int argc, char **argv)
     out = NULL;
     map = NULL;
     abs_map_count = 0;
+    mres_out = NULL;
+    mres_symbol = NULL;
+    mres_export_count = 0;
     l.image_base = 0UL;
     first = 1;
     while (first < argc && argv[first][0] == '-') {
@@ -572,12 +712,23 @@ int main(int argc, char **argv)
             if (abs_map_count >= 32) { usage(); return 1; }
             abs_maps[abs_map_count++] = argv[first + 1];
             first += 2;
+        } else if (strcmp(argv[first], "-R") == 0 && first + 1 < argc) {
+            mres_out = argv[first + 1];
+            first += 2;
+        } else if (strcmp(argv[first], "-N") == 0 && first + 1 < argc) {
+            mres_symbol = argv[first + 1];
+            first += 2;
+        } else if (strcmp(argv[first], "-X") == 0 && first + 1 < argc) {
+            if (mres_export_count >= 32) { usage(); return 1; }
+            mres_exports[mres_export_count++] = argv[first + 1];
+            first += 2;
         } else {
             usage();
             return 1;
         }
     }
-    if (out == NULL || first >= argc) { usage(); return 1; }
+    if (out == NULL || first >= argc ||
+        ((mres_out == NULL) != (mres_symbol == NULL))) { usage(); return 1; }
     rc = 1;
     for (i = 0; i < abs_map_count; i++)
         if (add_abs_map(&l, abs_maps[i]) != 0) goto done;
@@ -619,6 +770,14 @@ int main(int argc, char **argv)
     if (map != NULL && write_map(map, &l) != 0) {
         fprintf(stderr, "dlink: cannot write map\n");
         remove(out);
+        goto done;
+    }
+    if (mres_out != NULL &&
+        write_mres_object(mres_out, mres_symbol, mres_exports,
+                          mres_export_count, &l) != 0) {
+        fprintf(stderr, "dlink: cannot write MRES package object\n");
+        remove(out);
+        if (map != NULL) remove(map);
         goto done;
     }
     rc = 0;

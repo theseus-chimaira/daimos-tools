@@ -56,7 +56,7 @@ These tools are distributed under the MIT License. See `LICENCE`.
 `dlink` is the minimal DAIMOS static linker.  It consumes DOBJ1 relocatable
 objects and DARC1 static archives and emits the existing DXR V1 executable
 format.  DOBJ1 deliberately carries only semantic TEXT/DATA/BSS sections,
-global definitions/imports, optional entry selection, and RH18 relocations.
+global definitions/imports, optional entry selection, and RH18/LH18 relocations.
 Local assembler labels are resolved before object emission and are not part of
 the serialized symbol namespace.
 
@@ -69,3 +69,11 @@ The first format revision intentionally excludes debug records, weak symbols,
 dynamic linking, named sections, and DEC REL compatibility.  TEXT/DATA/BSS
 identity is preserved by the linker so later DAIMOS shared-text and fixed-slot
 overlay outputs do not require an object-format redesign.
+
+For DAIMOS bootstrap modules, `dlink -R package.dobj -N package_symbol` can
+also emit a compact relocatable resident-image package while doing the normal
+link once at base zero.  Repeated `-X symbol` options export offsets from that
+package.  The package contains initialized words, BSS size, and a two-bit-per-
+word LH18/RH18 relocation map; absolute definitions supplied with `-A map` are
+resolved normally and are not marked for runtime relocation.  This does not
+require a second compile or sizing link pass.

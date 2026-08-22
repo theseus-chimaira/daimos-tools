@@ -151,6 +151,86 @@ bad:
     return -1;
 }
 
+
+static int check_mres_output(void)
+{
+    struct dobj_object o;
+    struct dobj_object pkg;
+    FILE *f;
+    FILE *mf;
+    int rc;
+
+    memset(&o, 0, sizeof(o));
+    o.text_words = 2UL;
+    o.bss_words = 1UL;
+    o.symbol_count = 2UL;
+    o.reloc_count = 3UL;
+    o.text = (struct dobj_word *)calloc(2U, sizeof(*o.text));
+    o.symbols = (struct dobj_symbol *)calloc(2U, sizeof(*o.symbols));
+    o.relocs = (struct dobj_reloc *)calloc(3U, sizeof(*o.relocs));
+    if (o.text == NULL || o.symbols == NULL || o.relocs == NULL) {
+        dobj_free(&o);
+        return -1;
+    }
+    strcpy(o.symbols[0].name, "mres_entry");
+    o.symbols[0].kind = DOBJ_SYM_DEF;
+    o.symbols[0].sec = DOBJ_SEC_TEXT;
+    strcpy(o.symbols[1].name, "__fixed");
+    o.symbols[1].kind = DOBJ_SYM_UNDEF;
+    o.symbols[1].sec = DOBJ_SEC_ABS;
+    o.relocs[0].loc_sec = DOBJ_SEC_TEXT;
+    o.relocs[0].type = DOBJ_RELOC_LOCAL_LH18;
+    o.relocs[0].target_sec = DOBJ_SEC_TEXT;
+    o.relocs[0].offset = 0UL;
+    o.relocs[1].loc_sec = DOBJ_SEC_TEXT;
+    o.relocs[1].type = DOBJ_RELOC_LOCAL_RH18;
+    o.relocs[1].target_sec = DOBJ_SEC_BSS;
+    o.relocs[1].offset = 0UL;
+    o.relocs[2].loc_sec = DOBJ_SEC_TEXT;
+    o.relocs[2].type = DOBJ_RELOC_SYMBOL_RH18;
+    o.relocs[2].offset = 1UL;
+    o.relocs[2].symbol = 2UL;
+    if (save_object("tests/mres-input.dobj", &o) != 0) {
+        dobj_free(&o);
+        return -1;
+    }
+    dobj_free(&o);
+    mf = fopen("tests/mres-abs.map", "w");
+    if (mf == NULL)
+        return -1;
+    fprintf(mf, "__fixed                          000060\n");
+    if (fclose(mf) != 0)
+        return -1;
+    rc = system("./dlink -o tests/mres.dxr -M tests/mres.map "
+                "-A tests/mres-abs.map -R tests/mres-package.dobj "
+                "-N mres_package -X mres_entry tests/mres-input.dobj");
+    if (rc != 0)
+        return -1;
+    f = fopen("tests/mres-package.dobj", "rb");
+    if (f == NULL || dobj_read(f, &pkg) != 0) {
+        if (f != NULL) fclose(f);
+        return -1;
+    }
+    fclose(f);
+    if (pkg.data_words != 7UL || pkg.symbol_count != 1UL ||
+        strcmp(pkg.symbols[0].name, "mres_package") != 0 ||
+        pkg.data[1].lh != 2UL || pkg.data[1].rh != 1UL ||
+        pkg.data[2].lh != 1UL || pkg.data[2].rh != 1UL ||
+        pkg.data[3].lh != 0UL || pkg.data[4].lh != 0UL ||
+        pkg.data[4].rh != 2UL || pkg.data[5].rh != 060UL ||
+        ((pkg.data[6].lh >> 16) & 3UL) != 3UL) {
+        dobj_free(&pkg);
+        return -1;
+    }
+    dobj_free(&pkg);
+    remove("tests/mres-input.dobj");
+    remove("tests/mres-abs.map");
+    remove("tests/mres.dxr");
+    remove("tests/mres.map");
+    remove("tests/mres-package.dobj");
+    return 0;
+}
+
 int main(void)
 {
     long add;
@@ -216,6 +296,10 @@ int main(void)
     }
     if (check_many_inputs() != 0) {
         fprintf(stderr, "dobj-test: dynamic input capacity contract failed\n");
+        return 1;
+    }
+    if (check_mres_output() != 0) {
+        fprintf(stderr, "dobj-test: MRES package contract failed\n");
         return 1;
     }
     printf("DOBJ1/DARC1 linker contract passed\n");
