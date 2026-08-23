@@ -31,6 +31,20 @@ static unsigned long parse_octal(const char *s, const char *what)
         return v;
 }
 
+static unsigned long long parse_octal_word(const char *s, const char *what)
+{
+        char *end;
+        unsigned long long v;
+
+        errno = 0;
+        v = strtoull(s, &end, 8);
+        if (errno != 0 || end == s || *end != '\0') {
+                fprintf(stderr, "mkstream: bad %s: %s\n", what, s);
+                exit(1);
+        }
+        return v;
+}
+
 static void usage(void)
 {
         fprintf(stderr,
@@ -87,7 +101,7 @@ int main(int argc, char **argv)
                 if (strcmp(op, "deposit") != 0)
                         continue;
                 addr = parse_octal(a, "deposit address");
-                word = parse_octal(w, "deposit word") & WORD_MASK;
+                word = parse_octal_word(w, "deposit word") & WORD_MASK;
                 if (addr < init_base || addr >= init_base + init_words) {
                         fprintf(stderr,
                             "mkstream: deposit %06lo outside init range %06lo..%06lo\n",

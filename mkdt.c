@@ -5,7 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define WORD_MASK 0777777777777UL
+#define WORD_MASK 0777777777777ULL
 
 static void put32(FILE *f, unsigned long v)
 {
@@ -21,17 +21,17 @@ static void put32(FILE *f, unsigned long v)
         }
 }
 
-static unsigned long parse_word(const char *s)
+static unsigned long long parse_word(const char *s)
 {
         char *end;
-        unsigned long v;
+        unsigned long long v;
 
         errno = 0;
-        v = strtoul(s, &end, 8);
+        v = strtoull(s, &end, 8);
         while (*end == ' ' || *end == '\t' || *end == '\r' || *end == '\n')
                 end++;
         if (errno != 0 || end == s || *end != '\0' || (v & ~WORD_MASK) != 0)
-                return ~0UL;
+                return ~0ULL;
         return v;
 }
 
@@ -82,7 +82,7 @@ int main(int argc, char **argv)
                 return 1;
         }
         while (fgets(line, sizeof(line), in) != NULL) {
-                unsigned long w;
+                unsigned long long w;
                 char *p;
 
                 p = line;
@@ -91,7 +91,7 @@ int main(int argc, char **argv)
                 if (*p == '\0' || *p == '\n' || *p == '#')
                         continue;
                 w = parse_word(p);
-                if (w == ~0UL) {
+                if (w == ~0ULL) {
                         fprintf(stderr, "mkdt: bad word: %s", line);
                         fclose(out);
                         fclose(in);
