@@ -9,7 +9,7 @@ builders, and simulator helper tools for the DAIMOS/PDP-10 toolchain.
 - `mkdsk`: creates small PDP-6 DSK270 DBOOT V1 test bootsets.
 - `mkdt`: writes PDP-6 18-bit SIMH DECtape images.
 - `mkstream`: wraps assembled standalone words as a Stage1 stream.
-- `mktap`: writes PDP-6 36-bit words as a SIMH magnetic-tape record.
+- `mktap`: writes PDP-6 36-bit words as an odd-parity 7-track SIMH magnetic-tape record.
 - `words2pt`: encodes octal 36-bit words as PDP-6 paper-tape bytes.
 - `darc`: builds indexed DARC1 target archives.
 - `dlink`: links DOBJ1 objects and DARC1 archives to DXR V1.

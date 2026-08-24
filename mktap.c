@@ -22,6 +22,24 @@ put32(FILE *f, unsigned long v)
         }
 }
 
+static unsigned char
+mtc_odd_parity_v1(unsigned char value)
+{
+        unsigned int bits;
+        unsigned int ones;
+
+        value &= 077U;
+        bits = value;
+        ones = 0U;
+        while (bits != 0U) {
+                ones += bits & 1U;
+                bits >>= 1;
+        }
+        if ((ones & 1U) == 0U)
+                value |= 0100U;
+        return value;
+}
+
 static unsigned long long
 parse_word(const char *s, int *ok)
 {
@@ -118,12 +136,12 @@ main(int argc, char **argv)
                         data = new_data;
                         cap = new_cap;
                 }
-                data[used++] = (unsigned char)(((w >> 30) & 077));
-                data[used++] = (unsigned char)(((w >> 24) & 077));
-                data[used++] = (unsigned char)(((w >> 18) & 077));
-                data[used++] = (unsigned char)(((w >> 12) & 077));
-                data[used++] = (unsigned char)(((w >> 6) & 077));
-                data[used++] = (unsigned char)((w & 077));
+                data[used++] = mtc_odd_parity_v1((unsigned char)(w >> 30));
+                data[used++] = mtc_odd_parity_v1((unsigned char)(w >> 24));
+                data[used++] = mtc_odd_parity_v1((unsigned char)(w >> 18));
+                data[used++] = mtc_odd_parity_v1((unsigned char)(w >> 12));
+                data[used++] = mtc_odd_parity_v1((unsigned char)(w >> 6));
+                data[used++] = mtc_odd_parity_v1((unsigned char)w);
         }
         fclose(in);
 

@@ -53,13 +53,14 @@ pdp10-dec-none-darc: darc
 pdp10-dec-none-objdump: pdp10-objdump
 	$(LN_S) pdp10-objdump $@
 
-test: dlink darc p10run pdp10-objdump
+test: dlink darc p10run pdp10-objdump mktap
 	$(CC) $(CFLAGS) -std=c89 -I. -o tests/dobj-test tests/dobj-test.c dobj.c
 	./tests/dobj-test
 	$(CC) $(CFLAGS) -I. -o tests/pdp10-objdump-mk tests/pdp10-objdump-test.c dobj.c
 	./tests/pdp10-objdump-test.sh
 	./tests/p10run-c89-test.sh
 	./tests/p10run-functional-test.sh
+	./tests/mktap-mtc-7track-v1-test.sh
 
 clean:
 	$(RM) $(CTOOLS) $(ALIASES) *.o tests/dobj-test tests/pdp10-objdump-mk tests/*.dobj tests/*.darc tests/*.dxr tests/*.map
