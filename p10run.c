@@ -558,8 +558,8 @@ static void find_libgcc(char *out, const char *gcc, const char *work)
 }
 
 static void link_objects(const char *dlink, const char *work, const char *name,
-                         char **objects, int nobj, const char *libgcc,
-                         char *dxr, char *map)
+                         char **objects, int nobj, const char *libc,
+                         const char *libgcc, char *dxr, char *map)
 {
     char **av;
     int ac;
@@ -573,7 +573,7 @@ static void link_objects(const char *dlink, const char *work, const char *name,
         cat_text(leaf, sizeof(leaf), ".map");
         make_path2(map, PATHSZ, work, leaf);
     }
-    av = (char **)malloc((size_t)(nobj + 8) * sizeof(av[0]));
+    av = (char **)malloc((size_t)(nobj + 9) * sizeof(av[0]));
     if (av == NULL)
         die("out of memory");
     ac = 0;
@@ -584,6 +584,8 @@ static void link_objects(const char *dlink, const char *work, const char *name,
     av[ac++] = map;
     for (i = 0; i < nobj; i++)
         av[ac++] = objects[i];
+    if (libc != NULL && *libc != 0)
+        av[ac++] = (char *)libc;
     av[ac++] = (char *)libgcc;
     av[ac] = NULL;
     if (run_wait(av, NULL, NULL, 30) != 0) {
@@ -919,7 +921,7 @@ int main(int argc, char **argv)
     char work[PATHSZ];
     char name[MAX_NAME];
     char gcc[PATHSZ], as[PATHSZ], dlink[PATHSZ], conv[PATHSZ], simh[PATHSZ];
-    char libgcc[PATHSZ];
+    char libc[PATHSZ], libgcc[PATHSZ];
     char **objects;
     char dxr[PATHSZ], map[PATHSZ], image[PATHSZ], runini[PATHSZ], log[PATHSZ];
     char labels_path[PATHSZ], report[PATHSZ];
@@ -983,8 +985,10 @@ int main(int argc, char **argv)
         compile_source(&o, gcc, as, work, i + 1, o.sources.v[i], obj);
         objects[i] = xstrdup(obj);
     }
+    join_path(libc, prefix, "lib/libc.a");
+    if (!path_exists(libc)) libc[0] = 0;
     find_libgcc(libgcc, gcc, work);
-    link_objects(dlink, work, name, objects, o.sources.n, libgcc, dxr, map);
+    link_objects(dlink, work, name, objects, o.sources.n, libc, libgcc, dxr, map);
     read_map(map, start, &labels);
     entry = dxr_entry(dxr, start);
     { char leaf[MAX_NAME + 20]; copy_text(leaf, sizeof(leaf), name); cat_text(leaf, sizeof(leaf), ".labels"); make_path2(labels_path, sizeof(labels_path), work, leaf); }
