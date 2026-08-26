@@ -1,0 +1,365 @@
+#!/usr/bin/env python3
+#
+# Build a hierarchical DAIMON initfs0 image as PDP-10 assembly or octal words.
+
+import argparse
+import pathlib
+import sys
+
+
+INITFS0_MAGIC = 0o51646060
+INITFS0_VERSION = 1
+INITFS0_HDR_WORDS = 8
+INITFS0_ENT_WORDS = 8
+INITFS0_MAX_ENTRIES = 24
+INITFS0_REG = 1
+INITFS0_DIR = 4
+
+
+def die(msg):
+    raise SystemExit(f"mkinitfs0: {msg}")
+
+
+def sixbit_name(name):
+    out = []
+    for ch in name:
+        if "a" <= ch <= "z":
+            ch = chr(ord(ch) - (ord("a") - ord("A")))
+        ok = ("A" <= ch <= "Z") or ("0" <= ch <= "9") or ch in "._-$%"
+        if not ok:
+            die(f"entry name {name!r} is not a SIXBIT V1 name")
+        out.append(ch)
+    return "".join(out)
+
+
+def normalize_image_path(text):
+    if "\0" in text:
+        die(f"entry path {text!r} contains NUL")
+    parts = [part for part in text.split("/") if part]
+    if not parts:
+        die("entry path must not be empty or root")
+    return tuple(sixbit_name(part) for part in parts)
+
+
+def parse_entry(spec):
+    parts = spec.split(":", 3)
+    if len(parts) not in (3, 4):
+        die(f"bad entry {spec!r}; expected image-path:host-path:mode[:encoding]")
+    image_path, path, mode_text = parts[:3]
+    encoding = parts[3] if len(parts) == 4 else "binary"
+
+    if encoding not in ("alias", "asm", "binary", "words"):
+        die(f"entry {image_path!r} has unsupported encoding {encoding!r}")
+
+    try:
+        mode = int(mode_text, 8)
+    except ValueError:
+        die(f"entry {image_path!r} mode {mode_text!r} is not octal")
+
+    ent = {
+        "parts": normalize_image_path(image_path),
+        "path": pathlib.Path(path),
+        "mode": mode,
+        "encoding": encoding,
+        "type": INITFS0_REG,
+    }
+    if encoding == "alias":
+        ent["alias_parts"] = normalize_image_path(path)
+    return ent
+
+
+def expand_entries(files):
+    by_path = {}
+    order = []
+
+    for ent in files:
+        parts = ent["parts"]
+        for depth in range(1, len(parts)):
+            dpath = parts[:depth]
+            old = by_path.get(dpath)
+            if old is None:
+                dent = {
+                    "parts": dpath,
+                    "mode": 0o555,
+                    "type": INITFS0_DIR,
+                    "encoding": None,
+                    "path": None,
+                }
+                by_path[dpath] = dent
+                order.append(dent)
+            elif old["type"] != INITFS0_DIR:
+                die(f"path {'/'.join(dpath)!r} is both file and directory")
+        if parts in by_path:
+            die(f"duplicate image path {'/'.join(parts)!r}")
+        by_path[parts] = ent
+        order.append(ent)
+
+    if len(order) > INITFS0_MAX_ENTRIES:
+        die(f"image has {len(order)} entries; maximum is {INITFS0_MAX_ENTRIES}")
+
+    index = {ent["parts"]: i for i, ent in enumerate(order)}
+    for ent in order:
+        ent["name"] = ent["parts"][-1]
+        parent = ent["parts"][:-1]
+        ent["parent"] = 0 if not parent else index[parent] + 1
+    return order
+
+
+def ascii_name_nonets(name):
+    try:
+        raw = name.encode("ascii")
+    except UnicodeEncodeError:
+        die(f"entry name {name!r} is not ASCII")
+    return list(raw) + [0]
+
+
+def pack_nonets(nonets):
+    words = []
+    for i in range(0, len(nonets), 4):
+        chunk = nonets[i:i + 4]
+        while len(chunk) < 4:
+            chunk.append(0)
+        word = 0
+        for nonet in chunk:
+            if nonet < 0 or nonet > 0x1FF:
+                die(f"nonet out of range: {nonet}")
+            word = (word << 9) | nonet
+        words.append(word)
+    return words
+
+
+def binary_nonets(data):
+    return list(data)
+
+
+def word_file_nonets(path):
+    out = []
+    for lineno, line in enumerate(path.read_text(encoding="ascii").splitlines(), 1):
+        line = line.split(";", 1)[0].split("#", 1)[0].strip()
+        if not line:
+            continue
+        try:
+            word = int(line, 8)
+        except ValueError:
+            die(f"{path}:{lineno}: word {line!r} is not octal")
+        if word < 0 or word >= (1 << 36):
+            die(f"{path}:{lineno}: word {line!r} is outside 36 bits")
+        out.extend([
+            (word >> 27) & 0x1FF,
+            (word >> 18) & 0x1FF,
+            (word >> 9) & 0x1FF,
+            word & 0x1FF,
+        ])
+    return out
+
+
+def asm_file_words(path):
+    lines = []
+    nwords = 0
+    for line in path.read_text(encoding="ascii").splitlines():
+        text = line.split(";", 1)[0].strip()
+        if not text:
+            continue
+        if text.startswith(".text") or text.startswith(".data"):
+            continue
+        if text.startswith(".globl") or text.startswith(".global"):
+            continue
+        if text.endswith(":"):
+            lines.append(text)
+            continue
+        if text.startswith(".") and not text.startswith(".word"):
+            die(f"{path}: unsupported asm directive {text!r}")
+        lines.append("\t" + text)
+        nwords += 1
+    return {
+        "asm_lines": lines,
+        "nwords": nwords,
+    }
+
+
+def load_entry(ent):
+    if ent["type"] == INITFS0_DIR:
+        ent["data_nonets"] = []
+        ent["data_words"] = []
+        ent["data_word_count"] = 0
+        ent["flags"] = 0
+        return
+    if ent["encoding"] == "alias":
+        ent["data_nonets"] = []
+        ent["data_words"] = []
+        ent["data_word_count"] = 0
+        ent["data_kind"] = "alias"
+        ent["flags"] = 0
+        return
+    if ent["encoding"] == "words":
+        nonets = word_file_nonets(ent["path"])
+        ent["data_kind"] = "words"
+    elif ent["encoding"] == "asm":
+        asm = asm_file_words(ent["path"])
+        ent["data_nonets"] = [0] * (asm["nwords"] * 4)
+        ent["data_words"] = asm["asm_lines"]
+        ent["data_word_count"] = asm["nwords"]
+        ent["data_kind"] = "asm"
+        ent["flags"] = 0
+        return
+    else:
+        nonets = binary_nonets(ent["path"].read_bytes())
+        ent["data_kind"] = "words"
+    ent["data_nonets"] = nonets
+    ent["data_words"] = pack_nonets(nonets)
+    ent["data_word_count"] = len(ent["data_words"])
+    ent["flags"] = 0
+
+
+def emit_word(out, word, comment=None):
+    if word < 0 or word >= (1 << 36):
+        die(f"word out of range: {word}")
+    line = f"\t.word\t0{word:012o}"
+    if comment:
+        line += f"\t; {comment}"
+    out.write(line + "\n")
+
+
+def emit_data_word(out, word):
+    if isinstance(word, str):
+        out.write(word + "\n")
+    else:
+        emit_word(out, word)
+
+
+def build_image(entries):
+    name_nonets = []
+    for ent in entries:
+        ent["name_off"] = len(name_nonets)
+        name_nonets.extend(ascii_name_nonets(ent["name"]))
+        load_entry(ent)
+
+    str_words = pack_nonets(name_nonets)
+    data_words = []
+    data_word_count = 0
+    by_parts = {ent["parts"]: ent for ent in entries}
+    for ent in entries:
+        if ent["type"] == INITFS0_DIR or ent.get("data_kind") == "alias":
+            ent["data_off"] = 0
+            continue
+        ent["data_off"] = data_word_count
+        data_words.extend(ent["data_words"])
+        data_word_count += ent["data_word_count"]
+    for ent in entries:
+        if ent.get("data_kind") != "alias":
+            continue
+        target = by_parts.get(ent["alias_parts"])
+        if target is None or target["type"] != INITFS0_REG:
+            die(f"alias target {'/'.join(ent['alias_parts'])!r} is not a file")
+        if target.get("data_kind") == "alias":
+            die(f"alias target {'/'.join(ent['alias_parts'])!r} is another alias")
+        ent["data_off"] = target["data_off"]
+        ent["data_word_count"] = target["data_word_count"]
+        ent["data_nonets"] = target["data_nonets"]
+
+    header = [
+        INITFS0_MAGIC,
+        INITFS0_VERSION,
+        len(entries),
+        INITFS0_ENT_WORDS,
+        len(str_words),
+        data_word_count,
+        0,
+        0,
+    ]
+    entry_words = []
+    for ent in entries:
+        entry_words.extend([
+            ent["name_off"],
+            ent["type"],
+            ent["mode"],
+            ent["data_off"],
+            ent["data_word_count"],
+            len(ent["data_nonets"]),
+            ent["parent"],
+            ent["flags"],
+        ])
+    return header, entry_words, str_words, data_words
+
+
+def emit_image(entries, label, out):
+    header, entry_words, str_words, data_words = build_image(entries)
+
+    out.write("\t.text\n")
+    out.write(f"\t.globl\t{label}\n")
+    out.write(f"\t.globl\t{label}_end\n")
+    out.write(f"{label}:\n")
+
+    for i, word in enumerate(header):
+        emit_word(out, word, f"hdr[{i}]")
+
+    pos = 0
+    for ent in entries:
+        path_text = "/" + "/".join(ent["parts"])
+        fields = entry_words[pos:pos + INITFS0_ENT_WORDS]
+        pos += INITFS0_ENT_WORDS
+        for i, word in enumerate(fields):
+            emit_word(out, word, f"{path_text} ent[{i}]")
+
+    out.write(f"{label}_strings:\n")
+    for word in str_words:
+        emit_word(out, word)
+
+    out.write(f"{label}_data:\n")
+    for word in data_words:
+        emit_data_word(out, word)
+
+    out.write(f"{label}_end:\n")
+    total = INITFS0_HDR_WORDS + len(entries) * INITFS0_ENT_WORDS + len(str_words) + len(data_words)
+    out.write(f"\t; initfs0 words: {total}\n")
+
+
+def emit_words(entries, out):
+    header, entry_words, str_words, data_words = build_image(entries)
+    for word in header + entry_words + str_words:
+        out.write(f"{word:012o}\n")
+    for word in data_words:
+        if isinstance(word, str):
+            die("raw word output does not support asm-encoded entries")
+        out.write(f"{word:012o}\n")
+
+
+def main(argv):
+    parser = argparse.ArgumentParser(
+        description="build a hierarchical DAIMON initfs0 image"
+    )
+    parser.add_argument(
+        "-o", "--output",
+        help="output assembly file; defaults to stdout",
+    )
+    parser.add_argument(
+        "--label", default="initfs0_image",
+        help="assembly label for the image start",
+    )
+    parser.add_argument(
+        "--format", choices=("asm", "words"), default="asm",
+        help="output format; default is asm",
+    )
+    parser.add_argument(
+        "entry", nargs="+",
+        help="entry as image-path:host-path:mode[:alias|asm|binary|words]",
+    )
+    args = parser.parse_args(argv)
+
+    entries = expand_entries([parse_entry(spec) for spec in args.entry])
+
+    emitter = emit_image if args.format == "asm" else emit_words
+    if args.output:
+        with open(args.output, "w", encoding="ascii") as out:
+            if args.format == "asm":
+                emitter(entries, args.label, out)
+            else:
+                emitter(entries, out)
+    elif args.format == "asm":
+        emitter(entries, args.label, sys.stdout)
+    else:
+        emitter(entries, sys.stdout)
+
+
+if __name__ == "__main__":
+    main(sys.argv[1:])

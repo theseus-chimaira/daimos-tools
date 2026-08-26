@@ -14,6 +14,8 @@ builders, and simulator helper tools for the DAIMOS/PDP-10 toolchain.
 - `darc`: builds indexed DARC1 target archives.
 - `dlink`: links DOBJ1 objects and DARC1 archives to DXR V1.
 - `pdp10-dec-none-darc`: target archive alias for `darc`.
+- `mkinitfs0`: builds hierarchical DAIMOS INITFS0 images as PDP-10 assembly or octal words.
+- `mkinitfs`: compatibility alias for `mkinitfs0`.
 - `simh/*.ini`: SIMH configuration files used by `p10run`.
 
 The assembler itself lives in the DAS repository. Install DAS and these tools
