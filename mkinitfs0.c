@@ -24,6 +24,7 @@ typedef unsigned long long word_t;
 #define ENC_WORDS   1
 #define ENC_ASM     2
 #define ENC_ALIAS   3
+#define ENC_DXR     4
 
 /* One element of the flattened data section: either a 36-bit word or an
    asm passthrough line (for .asm-encoded entries). */
@@ -213,6 +214,7 @@ static void parse_entry_spec(const char *spec, struct entry *e)
 	else if (strcmp(enc, "words")  == 0) e->encoding = ENC_WORDS;
 	else if (strcmp(enc, "asm")    == 0) e->encoding = ENC_ASM;
 	else if (strcmp(enc, "alias")  == 0) e->encoding = ENC_ALIAS;
+	else if (strcmp(enc, "dxr")    == 0) e->encoding = ENC_DXR;
 	else die("entry '%s' has unsupported encoding '%s'", f[0], enc);
 
 	m = strtoul(f[2], &endp, 8);
@@ -392,6 +394,83 @@ static unsigned int *load_word_file_nonets(const char *path, int *nout)
 	return out;
 }
 
+/* Read a DXR1 executable and return its words as nonets.
+   Each DXR container word is a 36-bit PDP-10 word in the low 36 bits of an
+   8-byte little-endian value.  Layout: bits 0-17 = rh, bits 18-31 = lh low
+   14, bits 32-35 = lh high 4; bits 36-63 must be zero. */
+static unsigned int *load_dxr_nonets(const char *path, int *nout)
+{
+	FILE *f;
+	unsigned char *buf;
+	long sz;
+	int i, nwords;
+	word_t *words;
+	unsigned int *out;
+	word_t dxr_lh;
+	int image_words, reloc_words;
+
+	f = fopen(path, "rb");
+	if (!f) { perror(path); exit(1); }
+	if (fseek(f, 0, SEEK_END) != 0 || (sz = ftell(f)) < 0) {
+		perror(path); exit(1);
+	}
+	rewind(f);
+	if (sz < 16 || sz % 8 != 0)
+		die("%s: DXR size is not a whole number of 36-bit container words",
+		    path);
+
+	buf = (unsigned char *)xmalloc((size_t)sz);
+	if (fread(buf, 1, (size_t)sz, f) != (size_t)sz) { perror(path); exit(1); }
+	fclose(f);
+
+	nwords = (int)(sz / 8);
+	words = (word_t *)xmalloc((size_t)nwords * sizeof(word_t));
+	for (i = 0; i < nwords; i++) {
+		unsigned char *p = buf + i * 8;
+		unsigned long lo =  (unsigned long)p[0]
+		                 | ((unsigned long)p[1] <<  8)
+		                 | ((unsigned long)p[2] << 16)
+		                 | ((unsigned long)p[3] << 24);
+		unsigned long hi =  (unsigned long)p[4]
+		                 | ((unsigned long)p[5] <<  8)
+		                 | ((unsigned long)p[6] << 16)
+		                 | ((unsigned long)p[7] << 24);
+		if (hi & ~0xFUL)
+			die("%s: DXR word at byte %d has bits outside 36 bits",
+			    path, i * 8);
+		{
+			word_t rh = lo & 0777777UL;
+			word_t lh = ((lo >> 18) | (hi << 14)) & 0777777UL;
+			words[i] = (lh << 18) | rh;
+		}
+	}
+	free(buf);
+
+	/* Validate SIXBIT("DXR") magic in the left half of word[0]. */
+	dxr_lh = ((word_t)('D' - 040) << 12)
+	        | ((word_t)('X' - 040) <<  6)
+	        |  (word_t)('R' - 040);
+	if (((words[0] >> 18) & 0777777ULL) != dxr_lh)
+		die("%s: not a DXR1 executable", path);
+
+	image_words = (int)((words[1] >> 18) & 0777777ULL);
+	reloc_words = (image_words + 35) / 36;
+	if (nwords != 2 + image_words + reloc_words)
+		die("%s: DXR length is %d words, expected %d",
+		    path, nwords, 2 + image_words + reloc_words);
+
+	out = (unsigned int *)xmalloc((size_t)nwords * 4 * sizeof(unsigned int));
+	for (i = 0; i < nwords; i++) {
+		out[i*4+0] = (unsigned int)((words[i] >> 27) & 0x1FFU);
+		out[i*4+1] = (unsigned int)((words[i] >> 18) & 0x1FFU);
+		out[i*4+2] = (unsigned int)((words[i] >>  9) & 0x1FFU);
+		out[i*4+3] = (unsigned int)( words[i]        & 0x1FFU);
+	}
+	free(words);
+	*nout = nwords * 4;
+	return out;
+}
+
 /* Strip trailing whitespace in-place. */
 static void rtrim(char *s)
 {
@@ -492,6 +571,8 @@ static void load_entry(struct entry *e)
 
 	if (e->encoding == ENC_WORDS)
 		e->data_nonets = load_word_file_nonets(e->path, &e->ndata_nonets);
+	else if (e->encoding == ENC_DXR)
+		e->data_nonets = load_dxr_nonets(e->path, &e->ndata_nonets);
 	else
 		e->data_nonets = load_binary_nonets(e->path, &e->ndata_nonets);
 

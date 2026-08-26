@@ -68,6 +68,7 @@ test: dlink darc p10run pdp10-objdump mktap mkinitfs
 	./tests/p10run-functional-test.sh
 	./tests/mktap-mtc-7track-v1-test.sh
 	./tests/mkinitfs0-test.sh
+	./tests/mkinitfs0-dxr-v1-test.sh
 
 clean:
 	$(RM) $(CTOOLS) $(ALIASES) *.o tests/dobj-test tests/pdp10-objdump-mk tests/*.dobj tests/*.darc tests/*.dxr tests/*.map
