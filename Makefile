@@ -8,11 +8,9 @@ INSTALL ?= install
 LN_S ?= ln -sf
 RM ?= rm -f
 CC ?= cc
-PYTHON ?= python3
 CFLAGS ?= -Wall -Wextra -O2 -std=c99
 
-CTOOLS = mkdsk mkdt mkstream mktap words2pt dlink darc p10run pdp10-objdump
-SCRIPTS = mkinitfs0
+CTOOLS = mkdsk mkdt mkstream mktap words2pt dlink darc p10run pdp10-objdump mkinitfs0
 ALIASES = pdp10-dec-none-darc pdp10-dec-none-objdump mkinitfs
 SIMH_INIS = simh/pdp6.ini simh/pdp10-ka.ini simh/pdp10-ki.ini \
 	simh/pdp10-kl.ini simh/pdp10-ks.ini
@@ -49,6 +47,9 @@ p10run: p10run.c
 pdp10-objdump: pdp10-objdump.c dobj.c dobj.h
 	$(CC) $(CFLAGS) -o $@ pdp10-objdump.c dobj.c
 
+mkinitfs0: mkinitfs0.c
+	$(CC) $(CFLAGS) -o $@ mkinitfs0.c
+
 pdp10-dec-none-darc: darc
 	$(LN_S) darc $@
 
@@ -66,14 +67,14 @@ test: dlink darc p10run pdp10-objdump mktap mkinitfs
 	./tests/p10run-c89-test.sh
 	./tests/p10run-functional-test.sh
 	./tests/mktap-mtc-7track-v1-test.sh
-	$(PYTHON) tests/mkinitfs0-test.py
+	./tests/mkinitfs0-test.sh
 
 clean:
 	$(RM) $(CTOOLS) $(ALIASES) *.o tests/dobj-test tests/pdp10-objdump-mk tests/*.dobj tests/*.darc tests/*.dxr tests/*.map
 
 install: all
 	$(INSTALL) -d $(DESTDIR)$(BINDIR) $(DESTDIR)$(DATADIR)/simh $(DESTDIR)$(INCLUDEDIR)
-	$(INSTALL) -m 755 $(CTOOLS) $(SCRIPTS) $(DESTDIR)$(BINDIR)/
+	$(INSTALL) -m 755 $(CTOOLS) $(DESTDIR)$(BINDIR)/
 	$(LN_S) darc $(DESTDIR)$(BINDIR)/pdp10-dec-none-darc
 	$(LN_S) pdp10-objdump $(DESTDIR)$(BINDIR)/pdp10-dec-none-objdump
 	$(LN_S) mkinitfs0 $(DESTDIR)$(BINDIR)/mkinitfs
@@ -82,7 +83,7 @@ install: all
 	@echo "Installed PDP-10 compatibility tools to $(DESTDIR)$(BINDIR)"
 
 uninstall:
-	@for f in $(CTOOLS) $(SCRIPTS) $(ALIASES); do \
+	@for f in $(CTOOLS) $(ALIASES); do \
 		$(RM) "$(DESTDIR)$(BINDIR)/$$f"; \
 	done
 	$(RM) $(ALIASES)
