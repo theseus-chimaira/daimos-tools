@@ -731,7 +731,7 @@ static void emit_image(FILE *out, const char *label)
 		int f;
 		fmt_path(e->parts, e->nparts, pb, sizeof(pb));
 		for (f = 0; f < INITFS0_ENT_WORDS; f++) {
-			char comment[192];
+			char comment[sizeof(pb) + 16];
 			snprintf(comment, sizeof(comment), "%s ent[%d]", pb, f);
 			emit_word(out, g_entry_words[pos++], comment);
 		}
