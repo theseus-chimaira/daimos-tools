@@ -54,6 +54,7 @@ struct bad_run {
 
 struct member {
         struct bad_run bad[MAX_BAD_RUNS];
+        unsigned sectors;
         unsigned bad_count;
         unsigned db0_sector;
         unsigned db1_sector;
@@ -252,11 +253,12 @@ static void make_dbx(unsigned long long *words, unsigned mask,
         if (d6fs_layout) {
                 unsigned usable;
 
-                if (m->boot_start >= SECTORS || swap_tail >= SECTORS - m->boot_start) {
+                if (m->boot_start >= m->sectors ||
+                    swap_tail >= m->sectors - m->boot_start) {
                         fprintf(stderr, "mkdsk: D6FS layout leaves no usable sectors\n");
                         exit(1);
                 }
-                usable = SECTORS - m->boot_start - swap_tail;
+                usable = m->sectors - m->boot_start - swap_tail;
                 words[D6FS_LAYOUT_MAGIC_WORD] = D6FS_LAYOUT_MAGIC;
                 words[D6FS_LAYOUT_RANGE_WORD] =
                     ((unsigned long long)m->boot_start << 18) | usable;
@@ -332,7 +334,8 @@ static void usage(void)
         fprintf(stderr,
             "usage: mkdsk -n members [-M member-mask] "
             "-m clean|db0|db1|bad -p words -o dir "
-            "[--d6fs-layout --logstore-blocks n --swap-tail-blocks n]\n");
+            "[--d6fs-layout --logstore-blocks n --swap-tail-blocks n] "
+            "[--member-sectors s0[,s1...]]\n");
         exit(2);
 }
 
@@ -352,6 +355,7 @@ int main(int argc, char **argv)
         const char *mode = NULL, *payload_path = NULL, *outdir = NULL;
         unsigned n = 0, member_mask = 0, payload_count, logical_sectors;
         unsigned logstore_blocks = 0, swap_tail_blocks = 0;
+        const char *member_sectors_arg = NULL;
         unsigned super_a = 0, super_b = 0;
         int d6fs_layout = 0;
         unsigned logical_index[MAX_MEMBERS], u, logical;
@@ -380,6 +384,8 @@ int main(int argc, char **argv)
                         logstore_blocks = (unsigned)strtoul(argv[++i], NULL, 0);
                 else if (strcmp(argv[i], "--swap-tail-blocks") == 0 && i + 1 < argc)
                         swap_tail_blocks = (unsigned)strtoul(argv[++i], NULL, 0);
+                else if (strcmp(argv[i], "--member-sectors") == 0 && i + 1 < argc)
+                        member_sectors_arg = argv[++i];
                 else
                         usage();
         }
@@ -399,6 +405,26 @@ int main(int argc, char **argv)
         }
 
         memset(members, 0, sizeof(members));
+        for (u = 0; u < n; ++u)
+                members[u].sectors = SECTORS;
+        if (member_sectors_arg != NULL) {
+                const char *q = member_sectors_arg;
+
+                for (u = 0; u < n; ++u) {
+                        char *end;
+                        unsigned long v;
+
+                        if (*q == '\0')
+                                usage();
+                        v = strtoul(q, &end, 0);
+                        if (end == q || v == 0UL || v > SECTORS ||
+                            (u + 1U < n && *end != ',') ||
+                            (u + 1U == n && *end != '\0'))
+                                usage();
+                        members[u].sectors = (unsigned)v;
+                        q = end + (u + 1U < n ? 1 : 0);
+                }
+        }
         init_bad_runs(members, n, mode);
         compact = strcmp(mode, "clean") == 0;
 
@@ -433,6 +459,12 @@ int main(int argc, char **argv)
                             members[u].dbx_sector + 1);
                 }
                 members[u].boot_count = (logical_sectors + n - 1U - u) / n;
+                if (members[u].boot_start >= members[u].sectors ||
+                    members[u].boot_count > members[u].sectors -
+                    members[u].boot_start) {
+                        fprintf(stderr, "mkdsk: member %u is too small for boot stream\n", u);
+                        return 1;
+                }
                 pathlen = snprintf(path, sizeof(path), "%s/dsk%u.dsk",
                     outdir, u);
                 if (pathlen < 0 || (size_t)pathlen >= sizeof(path)) {
@@ -444,7 +476,8 @@ int main(int argc, char **argv)
                         perror(path);
                         return 1;
                 }
-                if (fseek(files[u], (long)SECTORS * SECTOR_WORDS * 8L - 1L,
+                if (fseek(files[u], (long)members[u].sectors *
+                    SECTOR_WORDS * 8L - 1L,
                     SEEK_SET) != 0 || fputc(0, files[u]) == EOF) {
                         perror(path);
                         return 1;

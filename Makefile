@@ -62,7 +62,7 @@ pdp10-dec-none-objdump: pdp10-objdump
 mkinitfs: mkinitfs0
 	$(LN_S) mkinitfs0 $@
 
-test: dlink darc p10run pdp10-objdump mktap mkinitfs
+test: dlink darc p10run pdp10-objdump mktap mkinitfs mkdsk
 	$(CC) $(CFLAGS) -std=c89 -I. -o tests/dobj-test tests/dobj-test.c dobj.c
 	./tests/dobj-test
 	$(CC) $(CFLAGS) -I. -o tests/pdp10-objdump-mk tests/pdp10-objdump-test.c dobj.c
@@ -72,6 +72,7 @@ test: dlink darc p10run pdp10-objdump mktap mkinitfs
 	./tests/mktap-mtc-7track-v1-test.sh
 	./tests/mkinitfs0-test.sh
 	./tests/mkinitfs0-dxr-v1-test.sh
+	TMPDIR='$(TMPDIR)' ./tests/mkdsk-member-sectors-v1-test.sh
 
 clean:
 	$(RM) $(CTOOLS) $(ALIASES) *.o tests/dobj-test tests/pdp10-objdump-mk tests/*.dobj tests/*.darc tests/*.dxr tests/*.map
