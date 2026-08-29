@@ -7,6 +7,7 @@ builders, and simulator helper tools for the DAIMOS/PDP-10 toolchain.
 
 - `p10run`: small PDP-6/KA10/KI10/KS10/KL10 SIMH bare-metal test runner.
 - `mkdsk`: creates small PDP-6 DSK270 DBOOT V1 test bootsets.
+- `mkd6fs`: formats D6FS V2 inside a DBOOT diskset using its root-layout descriptor.
 - `mkdt`: writes PDP-6 18-bit SIMH DECtape images.
 - `mkstream`: wraps assembled standalone words as a Stage1 stream.
 - `mktap`: writes PDP-6 36-bit words as an odd-parity 7-track SIMH magnetic-tape record.

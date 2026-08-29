@@ -10,7 +10,7 @@ RM ?= rm -f
 CC ?= cc
 CFLAGS ?= -Wall -Wextra -O2 -std=c99
 
-CTOOLS = mkdsk mkdt mkstream mktap words2pt dlink darc p10run pdp10-objdump mkinitfs0
+CTOOLS = mkdsk mkd6fs mkdt mkstream mktap words2pt dlink darc p10run pdp10-objdump mkinitfs0
 ALIASES = pdp10-dec-none-darc pdp10-dec-none-objdump mkinitfs
 SIMH_INIS = simh/pdp6.ini simh/pdp10-ka.ini simh/pdp10-ki.ini \
 	simh/pdp10-kl.ini simh/pdp10-ks.ini
@@ -22,6 +22,9 @@ all: $(CTOOLS) $(ALIASES)
 
 mkdsk: mkdsk.c
 	$(CC) $(CFLAGS) -o $@ mkdsk.c
+
+mkd6fs: mkd6fs.c
+	$(CC) $(CFLAGS) -o $@ mkd6fs.c
 
 mkdt: mkdt.c
 	$(CC) $(CFLAGS) -o $@ mkdt.c

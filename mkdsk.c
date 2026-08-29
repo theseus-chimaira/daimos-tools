@@ -39,6 +39,14 @@
 #define MEMBER_F_REPLICA 000004U
 #define MEMBER_F_COMPLETE_REQ 000010U
 
+/* Optional D6FS V2 root-layout extension in DBOOT words 6..10. */
+#define D6FS_LAYOUT_MAGIC 0442654636222ULL /* SIXBIT /D6FSR2/ */
+#define D6FS_LAYOUT_MAGIC_WORD 006U
+#define D6FS_LAYOUT_RANGE_WORD 007U
+#define D6FS_LAYOUT_SUPER_A 010U
+#define D6FS_LAYOUT_SUPER_B 011U
+#define D6FS_LAYOUT_SWAP_TAIL 012U
+
 struct bad_run {
         unsigned start;
         unsigned count;
@@ -233,13 +241,29 @@ static void make_db1(unsigned long long *words, struct member *m)
 }
 
 static void make_dbx(unsigned long long *words, unsigned mask,
-    unsigned index, unsigned count, int compact)
+    unsigned index, unsigned count, int compact, const struct member *m,
+    int d6fs_layout, unsigned super_a, unsigned super_b, unsigned swap_tail)
 {
         zero_sector(words);
         words[0] = six_header(compact ? MAGIC_DBC : MAGIC_DBX,
             DBOOTX_VERSION, 0, 0);
         words[2] = 0;
         words[5] = member_word(mask, index, count, 0);
+        if (d6fs_layout) {
+                unsigned usable;
+
+                if (m->boot_start >= SECTORS || swap_tail >= SECTORS - m->boot_start) {
+                        fprintf(stderr, "mkdsk: D6FS layout leaves no usable sectors\n");
+                        exit(1);
+                }
+                usable = SECTORS - m->boot_start - swap_tail;
+                words[D6FS_LAYOUT_MAGIC_WORD] = D6FS_LAYOUT_MAGIC;
+                words[D6FS_LAYOUT_RANGE_WORD] =
+                    ((unsigned long long)m->boot_start << 18) | usable;
+                words[D6FS_LAYOUT_SUPER_A] = super_a;
+                words[D6FS_LAYOUT_SUPER_B] = super_b;
+                words[D6FS_LAYOUT_SWAP_TAIL] = swap_tail;
+        }
 }
 
 static unsigned long long parse_word(const char *s)
@@ -307,7 +331,8 @@ static void usage(void)
 {
         fprintf(stderr,
             "usage: mkdsk -n members [-M member-mask] "
-            "-m clean|db0|db1|bad -p words -o dir\n");
+            "-m clean|db0|db1|bad -p words -o dir "
+            "[--d6fs-layout --logstore-blocks n --swap-tail-blocks n]\n");
         exit(2);
 }
 
@@ -326,6 +351,9 @@ int main(int argc, char **argv)
 {
         const char *mode = NULL, *payload_path = NULL, *outdir = NULL;
         unsigned n = 0, member_mask = 0, payload_count, logical_sectors;
+        unsigned logstore_blocks = 0, swap_tail_blocks = 0;
+        unsigned super_a = 0, super_b = 0;
+        int d6fs_layout = 0;
         unsigned logical_index[MAX_MEMBERS], u, logical;
         struct member members[MAX_MEMBERS];
         unsigned long long *payload;
@@ -346,6 +374,12 @@ int main(int argc, char **argv)
                         payload_path = argv[++i];
                 else if (strcmp(argv[i], "-o") == 0 && i + 1 < argc)
                         outdir = argv[++i];
+                else if (strcmp(argv[i], "--d6fs-layout") == 0)
+                        d6fs_layout = 1;
+                else if (strcmp(argv[i], "--logstore-blocks") == 0 && i + 1 < argc)
+                        logstore_blocks = (unsigned)strtoul(argv[++i], NULL, 0);
+                else if (strcmp(argv[i], "--swap-tail-blocks") == 0 && i + 1 < argc)
+                        swap_tail_blocks = (unsigned)strtoul(argv[++i], NULL, 0);
                 else
                         usage();
         }
@@ -375,6 +409,15 @@ int main(int argc, char **argv)
 
         payload = read_payload(payload_path, &payload_count);
         logical_sectors = (payload_count + SECTOR_WORDS - 1U) / SECTOR_WORDS;
+        if (d6fs_layout) {
+                if (logical_sectors > HALF_MASK || logstore_blocks > HALF_MASK ||
+                    logical_sectors > HALF_MASK - logstore_blocks - 2U) {
+                        fprintf(stderr, "mkdsk: D6FS reserved layout too large\n");
+                        return 1;
+                }
+                super_a = logical_sectors + logstore_blocks;
+                super_b = super_a + 1U;
+        }
         for (u = 0; u < n; u++) {
                 if (compact) {
                         members[u].dbx_sector = 0;
@@ -409,7 +452,8 @@ int main(int argc, char **argv)
         }
 
         for (u = 0; u < n; u++) {
-                make_dbx(sector, member_mask, logical_index[u], n, compact);
+                make_dbx(sector, member_mask, logical_index[u], n, compact,
+                    &members[u], d6fs_layout, super_a, super_b, swap_tail_blocks);
                 write_sector(files[u], members[u].dbx_sector, sector);
                 if (!compact) {
                         make_db0(sector, &members[u]);
