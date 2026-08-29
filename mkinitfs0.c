@@ -812,8 +812,6 @@ int main(int argc, char **argv)
 		}
 	}
 
-	if (nraw == 0) usage();
-
 	expand_entries(raw, nraw);
 	build_image();
 

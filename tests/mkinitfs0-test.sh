@@ -145,6 +145,19 @@ check "asm-hdr[2]" "$(word_at "$work/asm.s" 2)" "000000000002"
 check "asm-hdr[4]" "$(word_at "$work/asm.s" 4)" "000000000003"
 check "asm-hdr[5]" "$(word_at "$work/asm.s" 5)" "000000000002"
 
+# --- test_empty_image_header ---
+
+"$MKINITFS0" --format words -o "$work/empty.words"
+check "empty-lines" "$(wc -l < "$work/empty.words" | tr -d ' ')" "8"
+check "empty-hdr[0]" "$(sed -n '1p' "$work/empty.words")" "000051646060"
+check "empty-hdr[1]" "$(sed -n '2p' "$work/empty.words")" "000000000001"
+check "empty-hdr[2]" "$(sed -n '3p' "$work/empty.words")" "000000000000"
+check "empty-hdr[3]" "$(sed -n '4p' "$work/empty.words")" "000000000010"
+check "empty-hdr[4]" "$(sed -n '5p' "$work/empty.words")" "000000000000"
+check "empty-hdr[5]" "$(sed -n '6p' "$work/empty.words")" "000000000000"
+check "empty-hdr[6]" "$(sed -n '7p' "$work/empty.words")" "000000000000"
+check "empty-hdr[7]" "$(sed -n '8p' "$work/empty.words")" "000000000000"
+
 # --- test_rejects_duplicate_path ---
 
 printf 'x' > "$work/payload"
