@@ -10,7 +10,7 @@ RM ?= rm -f
 CC ?= cc
 CFLAGS ?= -Wall -Wextra -O2 -std=c99
 
-CTOOLS = mkdsk mkd6fs d6fsck mkdt mkstream mktap words2pt dlink darc p10run pdp10-objdump mkinitfs0
+CTOOLS = mkdsk mkd6fs d6fsck packfs d6bad d6log d6swap mkdt mkstream mktap words2pt dlink darc p10run pdp10-objdump mkinitfs0
 ALIASES = pdp10-dec-none-darc pdp10-dec-none-objdump mkinitfs
 SIMH_INIS = simh/pdp6.ini simh/pdp10-ka.ini simh/pdp10-ki.ini \
 	simh/pdp10-kl.ini simh/pdp10-ks.ini
@@ -23,11 +23,23 @@ all: $(CTOOLS) $(ALIASES)
 mkdsk: mkdsk.c
 	$(CC) $(CFLAGS) -o $@ mkdsk.c
 
-mkd6fs: mkd6fs.c
-	$(CC) $(CFLAGS) -o $@ mkd6fs.c
+mkd6fs: mkd6fs.c d6maint.c d6maint.h
+	$(CC) $(CFLAGS) -o $@ mkd6fs.c d6maint.c
 
 d6fsck: d6fsck.c
 	$(CC) $(CFLAGS) -o $@ d6fsck.c
+
+packfs: packfs.c d6maint.c d6maint.h
+	$(CC) $(CFLAGS) -o $@ packfs.c d6maint.c
+
+d6bad: d6bad.c d6maint.c d6maint.h
+	$(CC) $(CFLAGS) -o $@ d6bad.c d6maint.c
+
+d6log: d6log.c d6maint.c d6maint.h
+	$(CC) $(CFLAGS) -o $@ d6log.c d6maint.c
+
+d6swap: d6swap.c d6maint.c d6maint.h
+	$(CC) $(CFLAGS) -o $@ d6swap.c d6maint.c
 
 mkdt: mkdt.c
 	$(CC) $(CFLAGS) -o $@ mkdt.c
@@ -65,7 +77,7 @@ pdp10-dec-none-objdump: pdp10-objdump
 mkinitfs: mkinitfs0
 	$(LN_S) mkinitfs0 $@
 
-test: dlink darc p10run pdp10-objdump mktap mkinitfs mkdsk mkd6fs d6fsck
+test: dlink darc p10run pdp10-objdump mktap mkinitfs mkdsk mkd6fs d6fsck packfs d6bad d6log d6swap
 	$(CC) $(CFLAGS) -std=c89 -I. -o tests/dobj-test tests/dobj-test.c dobj.c
 	./tests/dobj-test
 	$(CC) $(CFLAGS) -I. -o tests/pdp10-objdump-mk tests/pdp10-objdump-test.c dobj.c
@@ -77,6 +89,8 @@ test: dlink darc p10run pdp10-objdump mktap mkinitfs mkdsk mkd6fs d6fsck
 	./tests/mkinitfs0-dxr-v1-test.sh
 	TMPDIR='$(TMPDIR)' ./tests/mkdsk-member-sectors-v1-test.sh
 	TMPDIR='$(TMPDIR)' ./tests/d6fsck-v1-test.sh
+	TMPDIR='$(TMPDIR)' ./tests/d6fsck-repair-v2-test.sh
+	TMPDIR='$(TMPDIR)' ./tests/d6-maintenance-v2-test.sh
 
 clean:
 	$(RM) $(CTOOLS) $(ALIASES) *.o tests/dobj-test tests/pdp10-objdump-mk tests/*.dobj tests/*.darc tests/*.dxr tests/*.map

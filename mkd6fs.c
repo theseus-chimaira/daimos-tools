@@ -1,3 +1,4 @@
+#include "d6maint.h"
 /* mkd6fs.c - format a D6FS V2 filesystem in a DBOOT diskset. */
 
 #include <errno.h>
@@ -26,9 +27,16 @@
 #define D6FS_LAYOUT_SUPER_A     010U
 #define D6FS_LAYOUT_SUPER_B     011U
 #define D6FS_LAYOUT_SWAP_TAIL   012U
+#define D6FS_LAYOUT_BOOTSTREAM_BLOCKS 013U
+#define D6FS_LAYOUT_LOGSTORE_START 014U
+#define D6FS_LAYOUT_LOGSTORE_BLOCKS 015U
+#define D6FS_LAYOUT_BADMAP_START 016U
+#define D6FS_LAYOUT_BADMAP_BLOCKS 017U
+#define D6FS_BADMAP_MAGIC       0442642414422ULL
 #define D6FS_TYPE_FREE          0U
 #define D6FS_TYPE_REG           1U
 #define D6FS_TYPE_DIR           2U
+#define D6FS_TYPE_SYMLINK       3U
 #define D6FS_STATE_CLEAN        0U
 #define HASH_MASK               077777777ULL
 #define EXTENT_LOW_BITS         12U
@@ -46,6 +54,17 @@ struct member {
         unsigned swap_tail;
 };
 
+struct layout_info {
+        unsigned bootstream_blocks;
+        unsigned logstore_start;
+        unsigned logstore_blocks;
+        unsigned badmap_start;
+        unsigned badmap_blocks;
+        unsigned swap_tail_blocks;
+};
+
+static struct layout_info disk_layout;
+
 struct node {
         char name[MAX_NAME_CHARS + 1U];
         unsigned parent;
@@ -53,6 +72,7 @@ struct node {
         unsigned mode;
         uint64_t *data;
         unsigned data_words;
+        unsigned tail;
         unsigned extent_start;
         unsigned extent_blocks;
 };
@@ -406,6 +426,51 @@ static void parse_file_spec(const char *spec)
                 nodes[idx].data = load_words(host, &nodes[idx].data_words);
         else
                 die("unsupported encoding (use dxr or words)");
+        nodes[idx].tail = nodes[idx].data_words == 0U ? 0U : 4U;
+        free(copy);
+}
+
+static void parse_symlink_spec(const char *spec)
+{
+        char *copy, *path, *target, *mode_s, *leaf, *p;
+        unsigned parent, mode, idx, chars, i, wi, shift, c;
+
+        copy = malloc(strlen(spec) + 1U);
+        if (copy == NULL)
+                die("out of memory");
+        strcpy(copy, spec);
+        path = copy;
+        p = strchr(path, ':');
+        if (p == NULL)
+                die("symlink spec requires PATH:TARGET:MODE");
+        *p++ = '\0';
+        target = p;
+        p = strrchr(target, ':');
+        if (p == NULL)
+                die("symlink spec requires PATH:TARGET:MODE");
+        *p++ = '\0';
+        mode_s = p;
+        mode = (unsigned)strtoul(mode_s, NULL, 8);
+        chars = (unsigned)strlen(target);
+        if (mode > 07777U || chars == 0U || chars > MAX_PATH_CHARS)
+                die("invalid symlink mode or target length");
+        parent = ensure_path_dirs(path, &leaf);
+        if (find_child(parent, leaf) >= 0)
+                die("duplicate filesystem path");
+        idx = add_node(parent, leaf, D6FS_TYPE_SYMLINK, mode);
+        nodes[idx].data_words = (chars + 5U) / 6U;
+        nodes[idx].tail = chars - (nodes[idx].data_words - 1U) * 6U;
+        nodes[idx].data = calloc(nodes[idx].data_words, sizeof(uint64_t));
+        if (nodes[idx].data == NULL)
+                die("out of memory");
+        for (i = 0U; i < chars; ++i) {
+                c = (unsigned char)target[i];
+                if (c < 040U || c > 0137U)
+                        die("symlink target is not SIXBIT representable");
+                wi = i / 6U;
+                shift = 30U - (i % 6U) * 6U;
+                nodes[idx].data[wi] |= (uint64_t)(c - 040U) << shift;
+        }
         free(copy);
 }
 
@@ -451,12 +516,53 @@ static void open_members(const char *dir, unsigned n, unsigned *super_ap,
                 if (i == 0U) {
                         sa = (unsigned)block[D6FS_LAYOUT_SUPER_A];
                         sb = (unsigned)block[D6FS_LAYOUT_SUPER_B];
+                        disk_layout.bootstream_blocks =
+                            (unsigned)block[D6FS_LAYOUT_BOOTSTREAM_BLOCKS];
+                        disk_layout.logstore_start =
+                            (unsigned)block[D6FS_LAYOUT_LOGSTORE_START];
+                        disk_layout.logstore_blocks =
+                            (unsigned)block[D6FS_LAYOUT_LOGSTORE_BLOCKS];
+                        disk_layout.badmap_start =
+                            (unsigned)block[D6FS_LAYOUT_BADMAP_START];
+                        disk_layout.badmap_blocks =
+                            (unsigned)block[D6FS_LAYOUT_BADMAP_BLOCKS];
+                        disk_layout.swap_tail_blocks =
+                            (unsigned)block[D6FS_LAYOUT_SWAP_TAIL];
                 } else if (sa != (unsigned)block[D6FS_LAYOUT_SUPER_A] ||
-                    sb != (unsigned)block[D6FS_LAYOUT_SUPER_B])
-                        die("members disagree on D6FS superblock locations");
+                    sb != (unsigned)block[D6FS_LAYOUT_SUPER_B] ||
+                    disk_layout.bootstream_blocks !=
+                    (unsigned)block[D6FS_LAYOUT_BOOTSTREAM_BLOCKS] ||
+                    disk_layout.logstore_start !=
+                    (unsigned)block[D6FS_LAYOUT_LOGSTORE_START] ||
+                    disk_layout.logstore_blocks !=
+                    (unsigned)block[D6FS_LAYOUT_LOGSTORE_BLOCKS] ||
+                    disk_layout.badmap_start !=
+                    (unsigned)block[D6FS_LAYOUT_BADMAP_START] ||
+                    disk_layout.badmap_blocks !=
+                    (unsigned)block[D6FS_LAYOUT_BADMAP_BLOCKS] ||
+                    disk_layout.swap_tail_blocks !=
+                    (unsigned)block[D6FS_LAYOUT_SWAP_TAIL])
+                        die("members disagree on D6FS reserved layout");
         }
         if (sa == sb || sa >= total_blocks() || sb >= total_blocks())
                 die("invalid D6FS superblock locations");
+        if (disk_layout.bootstream_blocks != 0U ||
+            disk_layout.logstore_start != 0U || disk_layout.logstore_blocks != 0U ||
+            disk_layout.badmap_start != 0U || disk_layout.badmap_blocks != 0U) {
+                if (disk_layout.logstore_start != disk_layout.bootstream_blocks ||
+                    disk_layout.badmap_start != disk_layout.logstore_start +
+                    disk_layout.logstore_blocks ||
+                    sa != disk_layout.badmap_start + disk_layout.badmap_blocks ||
+                    sb != sa + 1U)
+                        die("invalid D6FS reserved-range layout");
+        } else {
+                disk_layout.bootstream_blocks = sa;
+                disk_layout.logstore_start = sa;
+                disk_layout.logstore_blocks = 0U;
+                disk_layout.badmap_start = sa;
+                disk_layout.badmap_blocks = 0U;
+                fprintf(stderr, "mkd6fs: warning: legacy D6FSR2 layout lacks explicit reserved ranges\n");
+        }
         *super_ap = sa;
         *super_bp = sb;
 }
@@ -479,7 +585,7 @@ static void encode_fcb(uint64_t out[FCB_WORDS], const struct node *n)
 
         memset(out, 0, FCB_WORDS * sizeof(*out));
         out[0] = ((uint64_t)n->type << 33) | ((uint64_t)n->mode << 12) |
-            ((uint64_t)(n->data_words == 0U ? 0U : 4U) << 8) |
+            ((uint64_t)n->tail << 8) |
             ((uint64_t)(n->extent_blocks == 0U ? 0U : 1U) << 4);
         out[2] = n->data_words;
         out[4] = (uint64_t)n->parent << 18;
@@ -521,6 +627,7 @@ static void build_directories(void)
                         if (nodes[j].parent == i)
                                 ++children;
                 nodes[i].data_words = children * DIRENT_WORDS;
+                nodes[i].tail = nodes[i].data_words == 0U ? 0U : 4U;
                 if (nodes[i].data_words == 0U)
                         continue;
                 nodes[i].data = calloc(nodes[i].data_words, sizeof(uint64_t));
@@ -586,6 +693,25 @@ static uint64_t deterministic_id(uint64_t seed, unsigned total)
         return h & WORD_MASK;
 }
 
+static void initialize_badmap(void)
+{
+        uint64_t block[BLOCK_WORDS];
+        unsigned b;
+
+        if (disk_layout.badmap_blocks == 0U)
+                return;
+        memset(block, 0, sizeof(block));
+        block[0] = D6FS_BADMAP_MAGIC;
+        block[1] = 1U;
+        block[2] = 0U;
+        if (write_logical(disk_layout.badmap_start, block) != 0)
+                die("cannot initialize D6FS bad-block table");
+        memset(block, 0, sizeof(block));
+        for (b = 1U; b < disk_layout.badmap_blocks; ++b)
+                if (write_logical(disk_layout.badmap_start + b, block) != 0)
+                        die("cannot clear D6FS bad-block table");
+}
+
 static void format_fs(unsigned super_a, unsigned super_b)
 {
         unsigned total, fcb_count, fcb_blocks, freemap_blocks, summary_blocks;
@@ -611,6 +737,7 @@ static void format_fs(unsigned super_a, unsigned super_b)
         if (data_cursor >= total)
                 die("diskset too small for D6FS metadata");
 
+        initialize_badmap();
         build_directories();
         for (i = 0U; i < node_count; ++i) {
                 if (nodes[i].data_words == 0U)
@@ -702,14 +829,19 @@ static void format_fs(unsigned super_a, unsigned super_b)
         free(freemap);
         free(summary);
         fprintf(stderr,
-            "mkd6fs: %u blocks, %u nodes, super=%o/%o, data starts=%o\n",
-            total, node_count, super_a, super_b, summary_start + summary_blocks);
+            "mkd6fs: %u blocks, %u nodes, boot=%o log=%o+%o badmap=%o+%o "
+            "super=%o/%o data=%o swap-tail/member=%o\n",
+            total, node_count, disk_layout.bootstream_blocks,
+            disk_layout.logstore_start, disk_layout.logstore_blocks,
+            disk_layout.badmap_start, disk_layout.badmap_blocks, super_a, super_b,
+            summary_start + summary_blocks, disk_layout.swap_tail_blocks);
 }
 
 static void usage(void)
 {
         fprintf(stderr,
-            "usage: mkd6fs -n members -d diskdir -f PATH:HOST:MODE:dxr|words [...]\n");
+            "usage: mkd6fs -n members -d diskdir "
+            "[-f PATH:HOST:MODE:dxr|words] [-l PATH:TARGET:MODE] [...]\n");
         exit(2);
 }
 
@@ -717,11 +849,13 @@ int main(int argc, char **argv)
 {
         const char *dir;
         const char *specs[MAX_NODES];
-        unsigned nspec, n, super_a, super_b, i;
+        const char *links[MAX_NODES];
+        unsigned nspec, nlink, n, super_a, super_b, i;
         int a;
 
         dir = NULL;
         nspec = 0U;
+        nlink = 0U;
         n = 0U;
         memset(nodes, 0, sizeof(nodes));
         node_count = 1U;
@@ -737,13 +871,20 @@ int main(int argc, char **argv)
                         if (nspec >= MAX_NODES)
                                 die("too many file specs");
                         specs[nspec++] = argv[++a];
+                } else if (strcmp(argv[a], "-l") == 0 && a + 1 < argc) {
+                        if (nlink >= MAX_NODES)
+                                die("too many symlink specs");
+                        links[nlink++] = argv[++a];
                 } else
                         usage();
         }
-        if (dir == NULL || n == 0U || n > MAX_MEMBERS || nspec == 0U)
+        if (dir == NULL || n == 0U || n > MAX_MEMBERS ||
+            (nspec == 0U && nlink == 0U))
                 usage();
         for (i = 0U; i < nspec; ++i)
                 parse_file_spec(specs[i]);
+        for (i = 0U; i < nlink; ++i)
+                parse_symlink_spec(links[i]);
         open_members(dir, n, &super_a, &super_b);
         format_fs(super_a, super_b);
         for (i = 0U; i < member_count; ++i)
@@ -751,5 +892,7 @@ int main(int argc, char **argv)
                         die_path(members[i].path);
         for (i = 0U; i < node_count; ++i)
                 free(nodes[i].data);
+        if (d6m_run_fsck(argv[0], dir, n, 0) != 0)
+                die("post-format d6fsck failed");
         return 0;
 }

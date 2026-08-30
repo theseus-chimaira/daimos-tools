@@ -46,6 +46,11 @@
 #define D6FS_LAYOUT_SUPER_A 010U
 #define D6FS_LAYOUT_SUPER_B 011U
 #define D6FS_LAYOUT_SWAP_TAIL 012U
+#define D6FS_LAYOUT_BOOTSTREAM_BLOCKS 013U
+#define D6FS_LAYOUT_LOGSTORE_START 014U
+#define D6FS_LAYOUT_LOGSTORE_BLOCKS 015U
+#define D6FS_LAYOUT_BADMAP_START 016U
+#define D6FS_LAYOUT_BADMAP_BLOCKS 017U
 
 struct bad_run {
         unsigned start;
@@ -243,7 +248,9 @@ static void make_db1(unsigned long long *words, struct member *m)
 
 static void make_dbx(unsigned long long *words, unsigned mask,
     unsigned index, unsigned count, int compact, const struct member *m,
-    int d6fs_layout, unsigned super_a, unsigned super_b, unsigned swap_tail)
+    int d6fs_layout, unsigned super_a, unsigned super_b, unsigned swap_tail,
+    unsigned bootstream_blocks, unsigned logstore_start,
+    unsigned logstore_blocks, unsigned badmap_start, unsigned badmap_blocks)
 {
         zero_sector(words);
         words[0] = six_header(compact ? MAGIC_DBC : MAGIC_DBX,
@@ -265,6 +272,11 @@ static void make_dbx(unsigned long long *words, unsigned mask,
                 words[D6FS_LAYOUT_SUPER_A] = super_a;
                 words[D6FS_LAYOUT_SUPER_B] = super_b;
                 words[D6FS_LAYOUT_SWAP_TAIL] = swap_tail;
+                words[D6FS_LAYOUT_BOOTSTREAM_BLOCKS] = bootstream_blocks;
+                words[D6FS_LAYOUT_LOGSTORE_START] = logstore_start;
+                words[D6FS_LAYOUT_LOGSTORE_BLOCKS] = logstore_blocks;
+                words[D6FS_LAYOUT_BADMAP_START] = badmap_start;
+                words[D6FS_LAYOUT_BADMAP_BLOCKS] = badmap_blocks;
         }
 }
 
@@ -334,7 +346,7 @@ static void usage(void)
         fprintf(stderr,
             "usage: mkdsk -n members [-M member-mask] "
             "-m clean|db0|db1|bad -p words -o dir "
-            "[--d6fs-layout --logstore-blocks n --swap-tail-blocks n] "
+            "[--d6fs-layout --logstore-blocks n --badmap-blocks n --swap-tail-blocks n] "
             "[--member-sectors s0[,s1...]]\n");
         exit(2);
 }
@@ -354,7 +366,7 @@ int main(int argc, char **argv)
 {
         const char *mode = NULL, *payload_path = NULL, *outdir = NULL;
         unsigned n = 0, member_mask = 0, payload_count, logical_sectors;
-        unsigned logstore_blocks = 0, swap_tail_blocks = 0;
+        unsigned logstore_blocks = 0, badmap_blocks = 1, swap_tail_blocks = 0;
         const char *member_sectors_arg = NULL;
         unsigned super_a = 0, super_b = 0;
         int d6fs_layout = 0;
@@ -382,6 +394,8 @@ int main(int argc, char **argv)
                         d6fs_layout = 1;
                 else if (strcmp(argv[i], "--logstore-blocks") == 0 && i + 1 < argc)
                         logstore_blocks = (unsigned)strtoul(argv[++i], NULL, 0);
+                else if (strcmp(argv[i], "--badmap-blocks") == 0 && i + 1 < argc)
+                        badmap_blocks = (unsigned)strtoul(argv[++i], NULL, 0);
                 else if (strcmp(argv[i], "--swap-tail-blocks") == 0 && i + 1 < argc)
                         swap_tail_blocks = (unsigned)strtoul(argv[++i], NULL, 0);
                 else if (strcmp(argv[i], "--member-sectors") == 0 && i + 1 < argc)
@@ -437,11 +451,13 @@ int main(int argc, char **argv)
         logical_sectors = (payload_count + SECTOR_WORDS - 1U) / SECTOR_WORDS;
         if (d6fs_layout) {
                 if (logical_sectors > HALF_MASK || logstore_blocks > HALF_MASK ||
-                    logical_sectors > HALF_MASK - logstore_blocks - 2U) {
+                    badmap_blocks > HALF_MASK ||
+                    logical_sectors > HALF_MASK - logstore_blocks ||
+                    logical_sectors + logstore_blocks > HALF_MASK - badmap_blocks - 2U) {
                         fprintf(stderr, "mkdsk: D6FS reserved layout too large\n");
                         return 1;
                 }
-                super_a = logical_sectors + logstore_blocks;
+                super_a = logical_sectors + logstore_blocks + badmap_blocks;
                 super_b = super_a + 1U;
         }
         for (u = 0; u < n; u++) {
@@ -486,7 +502,9 @@ int main(int argc, char **argv)
 
         for (u = 0; u < n; u++) {
                 make_dbx(sector, member_mask, logical_index[u], n, compact,
-                    &members[u], d6fs_layout, super_a, super_b, swap_tail_blocks);
+                    &members[u], d6fs_layout, super_a, super_b, swap_tail_blocks,
+                    logical_sectors, logical_sectors, logstore_blocks,
+                    logical_sectors + logstore_blocks, badmap_blocks);
                 write_sector(files[u], members[u].dbx_sector, sector);
                 if (!compact) {
                         make_db0(sector, &members[u]);

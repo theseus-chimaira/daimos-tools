@@ -1,9 +1,12 @@
+#define _POSIX_C_SOURCE 200809L
+
 /* d6fsck.c - read-only structural checker for D6FS V2 disksets. */
 
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #define WORD_MASK               0777777777777ULL
 #define HALF_MASK               0777777U
@@ -22,6 +25,13 @@
 #define D6FS_LAYOUT_RANGE_WORD  007U
 #define D6FS_LAYOUT_SUPER_A     010U
 #define D6FS_LAYOUT_SUPER_B     011U
+#define D6FS_LAYOUT_SWAP_TAIL   012U
+#define D6FS_LAYOUT_BOOTSTREAM_BLOCKS 013U
+#define D6FS_LAYOUT_LOGSTORE_START 014U
+#define D6FS_LAYOUT_LOGSTORE_BLOCKS 015U
+#define D6FS_LAYOUT_BADMAP_START 016U
+#define D6FS_LAYOUT_BADMAP_BLOCKS 017U
+#define D6FS_BADMAP_MAGIC       0442642414422ULL
 #define D6FS_TYPE_FREE          0U
 #define D6FS_TYPE_REG           1U
 #define D6FS_TYPE_DIR           2U
@@ -40,7 +50,40 @@ struct member {
         unsigned descriptor;
         unsigned base;
         unsigned blocks;
+        unsigned sectors;
 };
+
+struct layout_info {
+        unsigned bootstream_blocks;
+        unsigned logstore_start;
+        unsigned logstore_blocks;
+        unsigned badmap_start;
+        unsigned badmap_blocks;
+        unsigned swap_tail_blocks;
+};
+
+static struct layout_info disk_layout;
+
+#ifdef D6FSCK_TEST_FAULTS
+static unsigned test_fault_write;
+static unsigned test_write_count;
+
+static void test_fault_after_durable_write(void)
+{
+        const char *s;
+
+        if (test_fault_write == 0U) {
+                s = getenv("D6FSCK_TEST_ABORT_WRITE");
+                if (s != NULL && *s != '\0')
+                        test_fault_write = (unsigned)strtoul(s, NULL, 0);
+                if (test_fault_write == 0U)
+                        test_fault_write = ~0U;
+        }
+        ++test_write_count;
+        if (test_write_count == test_fault_write)
+                _exit(99);
+}
+#endif
 
 struct super_info {
         uint64_t sequence;
@@ -70,6 +113,14 @@ struct fcb_info {
 static struct member members[MAX_MEMBERS];
 static unsigned member_count;
 static unsigned errors;
+static unsigned repairs;
+static int repair_mode;
+
+struct dir_patch {
+        unsigned dir;
+        uint64_t offset;
+        uint64_t value;
+};
 
 static void die(const char *msg)
 {
@@ -163,6 +214,46 @@ static int read_logical(unsigned logical, uint64_t block[BLOCK_WORDS])
         return read_phys(&members[mi], members[mi].base + local, block);
 }
 
+static void put64le(unsigned char p[8], uint64_t v)
+{
+        unsigned i;
+
+        v &= WORD_MASK;
+        for (i = 0; i < 8; ++i)
+                p[i] = (unsigned char)((v >> (i * 8U)) & 0377U);
+}
+
+static int write_phys(struct member *m, unsigned sector,
+    const uint64_t block[BLOCK_WORDS])
+{
+        unsigned char raw[8];
+        unsigned i;
+
+        if (!repair_mode || fseek(m->fp, (long)sector * BLOCK_WORDS * 8L,
+            SEEK_SET) != 0)
+                return -1;
+        for (i = 0; i < BLOCK_WORDS; ++i) {
+                put64le(raw, block[i]);
+                if (fwrite(raw, 1, 8, m->fp) != 8)
+                        return -1;
+        }
+        if (fflush(m->fp) != 0 || fsync(fileno(m->fp)) != 0)
+                return -1;
+#ifdef D6FSCK_TEST_FAULTS
+        test_fault_after_durable_write();
+#endif
+        return 0;
+}
+
+static int write_logical(unsigned logical, const uint64_t block[BLOCK_WORDS])
+{
+        unsigned mi, local;
+
+        if (map_logical(logical, &mi, &local) != 0)
+                return -1;
+        return write_phys(&members[mi], members[mi].base + local, block);
+}
+
 static void problem(const char *what, unsigned a, unsigned b)
 {
         if (b == ~0U)
@@ -175,8 +266,14 @@ static void problem(const char *what, unsigned a, unsigned b)
 static void scan_member(struct member *m)
 {
         uint64_t block[BLOCK_WORDS];
+        long bytes;
         unsigned s;
 
+        if (fseek(m->fp, 0L, SEEK_END) != 0 || (bytes = ftell(m->fp)) < 0 ||
+            bytes % (long)(BLOCK_WORDS * 8U) != 0)
+                die("invalid disk member length");
+        m->sectors = (unsigned)(bytes / (long)(BLOCK_WORDS * 8U));
+        rewind(m->fp);
         for (s = 0; s < SCAN_LIMIT; ++s) {
                 if (read_phys(m, s, block) != 0)
                         die("cannot scan DBOOT descriptor");
@@ -205,7 +302,7 @@ static void open_members(const char *dir, unsigned n, unsigned *sap,
                     "%s/dsk%u.dsk", dir, i);
                 if (len < 0 || (size_t)len >= sizeof(members[i].path))
                         die("disk path too long");
-                members[i].fp = fopen(members[i].path, "rb");
+                members[i].fp = fopen(members[i].path, repair_mode ? "r+b" : "rb");
                 if (members[i].fp == NULL)
                         die("cannot open disk member");
                 scan_member(&members[i]);
@@ -214,12 +311,57 @@ static void open_members(const char *dir, unsigned n, unsigned *sap,
                 if (i == 0) {
                         sa = (unsigned)block[D6FS_LAYOUT_SUPER_A];
                         sb = (unsigned)block[D6FS_LAYOUT_SUPER_B];
+                        disk_layout.swap_tail_blocks =
+                            (unsigned)block[D6FS_LAYOUT_SWAP_TAIL];
+                        disk_layout.bootstream_blocks =
+                            (unsigned)block[D6FS_LAYOUT_BOOTSTREAM_BLOCKS];
+                        disk_layout.logstore_start =
+                            (unsigned)block[D6FS_LAYOUT_LOGSTORE_START];
+                        disk_layout.logstore_blocks =
+                            (unsigned)block[D6FS_LAYOUT_LOGSTORE_BLOCKS];
+                        disk_layout.badmap_start =
+                            (unsigned)block[D6FS_LAYOUT_BADMAP_START];
+                        disk_layout.badmap_blocks =
+                            (unsigned)block[D6FS_LAYOUT_BADMAP_BLOCKS];
                 } else if (sa != (unsigned)block[D6FS_LAYOUT_SUPER_A] ||
-                    sb != (unsigned)block[D6FS_LAYOUT_SUPER_B])
-                        die("members disagree on superblock locations");
+                    sb != (unsigned)block[D6FS_LAYOUT_SUPER_B] ||
+                    disk_layout.swap_tail_blocks !=
+                    (unsigned)block[D6FS_LAYOUT_SWAP_TAIL] ||
+                    disk_layout.bootstream_blocks !=
+                    (unsigned)block[D6FS_LAYOUT_BOOTSTREAM_BLOCKS] ||
+                    disk_layout.logstore_start !=
+                    (unsigned)block[D6FS_LAYOUT_LOGSTORE_START] ||
+                    disk_layout.logstore_blocks !=
+                    (unsigned)block[D6FS_LAYOUT_LOGSTORE_BLOCKS] ||
+                    disk_layout.badmap_start !=
+                    (unsigned)block[D6FS_LAYOUT_BADMAP_START] ||
+                    disk_layout.badmap_blocks !=
+                    (unsigned)block[D6FS_LAYOUT_BADMAP_BLOCKS])
+                        die("members disagree on reserved layout");
         }
         if (sa == sb || sa >= total_blocks() || sb >= total_blocks())
                 die("invalid superblock locations");
+        if (disk_layout.bootstream_blocks != 0U ||
+            disk_layout.logstore_start != 0U || disk_layout.logstore_blocks != 0U ||
+            disk_layout.badmap_start != 0U || disk_layout.badmap_blocks != 0U) {
+                if (disk_layout.logstore_start != disk_layout.bootstream_blocks ||
+                    disk_layout.badmap_start != disk_layout.logstore_start +
+                    disk_layout.logstore_blocks ||
+                    sa != disk_layout.badmap_start + disk_layout.badmap_blocks ||
+                    sb != sa + 1U)
+                        die("invalid reserved-range layout");
+        } else {
+                disk_layout.bootstream_blocks = sa;
+                disk_layout.logstore_start = sa;
+                disk_layout.logstore_blocks = 0U;
+                disk_layout.badmap_start = sa;
+                disk_layout.badmap_blocks = 0U;
+                fprintf(stderr, "d6fsck: note: legacy layout without explicit reserved ranges\n");
+        }
+        for (i = 0; i < n; ++i)
+                if (members[i].base + members[i].blocks +
+                    disk_layout.swap_tail_blocks > members[i].sectors)
+                        die("D6FS/swap layout exceeds a member image");
         *sap = sa;
         *sbp = sb;
 }
@@ -289,7 +431,9 @@ static int fcb_decode(const uint64_t f[FCB_WORDS], unsigned total,
         i->extents = (unsigned)((f[0] >> 4) & 017U);
         i->size = f[2];
         i->parent = (unsigned)((f[4] >> 18) & HALF_MASK);
-        if (i->type > D6FS_TYPE_SYMLINK || i->tail > 4 || i->extents > EXTENTS ||
+        if (i->type > D6FS_TYPE_SYMLINK ||
+            (i->type == D6FS_TYPE_SYMLINK ? i->tail > 6 : i->tail > 4) ||
+            i->extents > EXTENTS ||
             (f[0] & 017U) != 0 || (f[4] & HALF_MASK) != 0 ||
             f[015] != 0 || f[016] != 0 || f[017] != 0)
                 return -1;
@@ -322,6 +466,17 @@ static int fcb_decode(const uint64_t f[FCB_WORDS], unsigned total,
 static int get_bit(const uint64_t *map, unsigned bit)
 {
         return (map[bit / 36U] & ((uint64_t)1U << (35U - bit % 36U))) != 0;
+}
+
+static void set_bit(uint64_t *map, unsigned bit, int value)
+{
+        uint64_t mask;
+
+        mask = (uint64_t)1U << (35U - bit % 36U);
+        if (value)
+                map[bit / 36U] |= mask;
+        else
+                map[bit / 36U] &= ~mask;
 }
 
 static void mark_range(unsigned char *used, unsigned total, unsigned start,
@@ -377,6 +532,41 @@ static int read_file_word(const struct super_info *s, const uint64_t *fcbs,
         return -1;
 }
 
+static int write_file_word(const struct super_info *s, const uint64_t *fcbs,
+    unsigned fi, uint64_t off, uint64_t value)
+{
+        const uint64_t *f = fcbs + (size_t)fi * FCB_WORDS;
+        unsigned e;
+        uint64_t left;
+
+        left = off;
+        for (e = 0; e < EXTENTS; ++e) {
+                uint64_t run, count, words;
+                unsigned start, blocks, logical, wi;
+                uint64_t block[BLOCK_WORDS];
+
+                if (e >= (unsigned)((f[0] >> 4) & 017U))
+                        break;
+                run = f[006 + e];
+                start = (unsigned)(run >> EXTENT_LOW_BITS);
+                count = ((uint64_t)extent_high(f[005], e) << EXTENT_LOW_BITS) |
+                    (run & EXTENT_LOW_MASK);
+                blocks = (unsigned)(count + 1);
+                words = (uint64_t)blocks * BLOCK_WORDS;
+                if (left >= words) {
+                        left -= words;
+                        continue;
+                }
+                logical = start + (unsigned)(left / BLOCK_WORDS);
+                wi = (unsigned)(left % BLOCK_WORDS);
+                if (logical >= s->total || read_logical(logical, block) != 0)
+                        return -1;
+                block[wi] = value & WORD_MASK;
+                return write_logical(logical, block);
+        }
+        return -1;
+}
+
 static uint64_t dir_hash(const uint64_t name[4])
 {
         uint64_t h, w;
@@ -400,18 +590,186 @@ static uint64_t dir_hash(const uint64_t name[4])
         return h;
 }
 
-static void check_filesystem(unsigned sa, unsigned sb)
+static int write_fcb_table(const struct super_info *s, const uint64_t *fcbs)
+{
+        unsigned fcb_blocks, b;
+
+        fcb_blocks = (s->fcb_count * FCB_WORDS + BLOCK_WORDS - 1) / BLOCK_WORDS;
+        for (b = 0; b < fcb_blocks; ++b) {
+                uint64_t block[BLOCK_WORDS];
+                unsigned words, i;
+
+                memset(block, 0, sizeof(block));
+                words = BLOCK_WORDS;
+                if ((b + 1) * BLOCK_WORDS > s->fcb_count * FCB_WORDS)
+                        words = s->fcb_count * FCB_WORDS - b * BLOCK_WORDS;
+                for (i = 0; i < words; ++i)
+                        block[i] = fcbs[(size_t)b * BLOCK_WORDS + i];
+                if (write_logical(s->fcb_start + b, block) != 0)
+                        return -1;
+        }
+        return 0;
+}
+
+static int write_map_blocks(unsigned start, unsigned blocks, const uint64_t *map)
+{
+        unsigned b;
+
+        for (b = 0; b < blocks; ++b)
+                if (write_logical(start + b, map + (size_t)b * BLOCK_WORDS) != 0)
+                        return -1;
+        return 0;
+}
+
+static void rebuild_summary(const struct super_info *s, const uint64_t *freemap,
+    uint64_t *summary)
+{
+        unsigned i;
+
+        memset(summary, 0, (size_t)s->summary_blocks * BLOCK_WORDS * sizeof(*summary));
+        for (i = 0; i < s->freemap_blocks; ++i) {
+                unsigned first, limit, p;
+                int has_free;
+
+                first = i * BITS_PER_MAP_BLOCK;
+                limit = first + BITS_PER_MAP_BLOCK;
+                if (limit > s->total)
+                        limit = s->total;
+                has_free = 0;
+                for (p = first; p < limit; ++p)
+                        if (!get_bit(freemap + (size_t)i * BLOCK_WORDS,
+                            p - first)) {
+                                has_free = 1;
+                                break;
+                        }
+                set_bit(summary, i, has_free);
+        }
+}
+
+static unsigned char **load_badmap(void)
+{
+        uint64_t *words;
+        unsigned char **bad;
+        unsigned capacity, count, i, b;
+
+        bad = calloc(member_count, sizeof(*bad));
+        if (bad == NULL)
+                die("out of memory");
+        for (i = 0; i < member_count; ++i) {
+                bad[i] = calloc(members[i].blocks, 1);
+                if (bad[i] == NULL)
+                        die("out of memory");
+        }
+        if (disk_layout.badmap_blocks == 0U)
+                return bad;
+        words = calloc((size_t)disk_layout.badmap_blocks * BLOCK_WORDS,
+            sizeof(*words));
+        if (words == NULL)
+                die("out of memory");
+        for (b = 0; b < disk_layout.badmap_blocks; ++b)
+                if (read_logical(disk_layout.badmap_start + b,
+                    words + (size_t)b * BLOCK_WORDS) != 0)
+                        die("cannot read bad-block table");
+        if (words[0] != D6FS_BADMAP_MAGIC) {
+                problem("invalid bad-block table magic", disk_layout.badmap_start, ~0U);
+                free(words);
+                return bad;
+        }
+        capacity = (disk_layout.badmap_blocks * BLOCK_WORDS - 4U) / 2U;
+        count = (unsigned)words[2];
+        if (count > capacity) {
+                problem("bad-block table count", count, capacity);
+                free(words);
+                return bad;
+        }
+        for (i = 0; i < count; ++i) {
+                uint64_t a = words[4U + i * 2U];
+                unsigned mi = (unsigned)((a >> 18) & HALF_MASK);
+                unsigned start = (unsigned)(a & HALF_MASK);
+                unsigned run = (unsigned)words[5U + i * 2U];
+                unsigned p;
+
+                if (mi >= member_count || run == 0U || start >= members[mi].sectors ||
+                    run > members[mi].sectors - start) {
+                        problem("invalid physical bad-block run", i, ~0U);
+                        continue;
+                }
+                for (p = start; p < start + run; ++p)
+                        if (p >= members[mi].base &&
+                            p < members[mi].base + members[mi].blocks)
+                                bad[mi][p - members[mi].base] = 1;
+        }
+        free(words);
+        return bad;
+}
+
+static void free_badmap(unsigned char **bad)
+{
+        unsigned i;
+
+        if (bad == NULL)
+                return;
+        for (i = 0; i < member_count; ++i)
+                free(bad[i]);
+        free(bad);
+}
+
+static int publish_next_super(unsigned sa, unsigned sb, unsigned selected,
+    const uint64_t selected_block[BLOCK_WORDS], unsigned state,
+    unsigned *new_selected, uint64_t new_block[BLOCK_WORDS])
+{
+        unsigned target;
+
+        memcpy(new_block, selected_block, BLOCK_WORDS * sizeof(*new_block));
+        new_block[1] = (new_block[1] + 1U) & WORD_MASK;
+        new_block[2] = state;
+        target = selected == sa ? sb : sa;
+        if (write_logical(target, new_block) != 0)
+                return -1;
+        if (new_selected != NULL)
+                *new_selected = target;
+        return 0;
+}
+
+static void stage_dir_patch(struct dir_patch **patches, unsigned *count,
+    unsigned *capacity, unsigned dir, uint64_t offset, uint64_t value)
+{
+        struct dir_patch *next;
+        unsigned ncap;
+
+        if (*count == *capacity) {
+                ncap = *capacity == 0U ? 8U : *capacity * 2U;
+                next = realloc(*patches, (size_t)ncap * sizeof(*next));
+                if (next == NULL)
+                        die("out of memory staging directory repairs");
+                *patches = next;
+                *capacity = ncap;
+        }
+        (*patches)[*count].dir = dir;
+        (*patches)[*count].offset = offset;
+        (*patches)[*count].value = value;
+        ++*count;
+}
+
+static int check_filesystem(unsigned sa, unsigned sb)
 {
         uint64_t ba[BLOCK_WORDS], bb[BLOCK_WORDS];
         struct super_info ai, bi, *s;
-        int av, bv;
-        unsigned selected, total, fcb_blocks, i, b;
+        int av, bv, ambiguous, changed_fcbs, changed_dirs, changed_map;
+        unsigned selected, total, fcb_blocks, i, b, planned;
+        unsigned dir_patch_count, dir_patch_capacity;
+        struct dir_patch *dir_patches;
         uint64_t *fcbs, *freemap, *summary;
         struct fcb_info *infos;
-        unsigned char *used, *reachable;
-        unsigned *refs, *queue;
+        unsigned char *used, *reachable, *crosslinked;
+        unsigned char **bad_phys;
+        unsigned *refs, *ref_parent, *queue;
         unsigned qh, qt;
+        uint64_t *selected_block;
 
+        ambiguous = changed_fcbs = changed_dirs = changed_map = 0;
+        planned = dir_patch_count = dir_patch_capacity = 0U;
+        dir_patches = NULL;
         if (read_logical(sa, ba) != 0 || read_logical(sb, bb) != 0)
                 die("cannot read superblocks");
         av = super_decode(ba, total_blocks(), &ai) == 0;
@@ -420,17 +778,24 @@ static void check_filesystem(unsigned sa, unsigned sb)
         if (!bv) problem("invalid superblock", sb, ~0U);
         if (!av && !bv)
                 die("no structurally valid superblock");
-        if (av && bv && !same_identity(&ai, &bi))
+        if (av && bv && !same_identity(&ai, &bi)) {
                 problem("superblocks disagree", sa, sb);
-        if (av && bv && ai.sequence == bi.sequence && memcmp(ba, bb, SUPER_WORDS * sizeof(uint64_t)) != 0)
-                problem("equal-sequence superblocks differ", sa, sb);
-        if (!bv || (av && ai.sequence >= bi.sequence)) {
-                s = &ai; selected = sa;
-        } else {
-                s = &bi; selected = sb;
+                ambiguous = 1;
         }
-        if (s->total != total_blocks())
+        if (av && bv && ai.sequence == bi.sequence &&
+            memcmp(ba, bb, SUPER_WORDS * sizeof(uint64_t)) != 0) {
+                problem("equal-sequence superblocks differ", sa, sb);
+                ambiguous = 1;
+        }
+        if (!bv || (av && ai.sequence >= bi.sequence)) {
+                s = &ai; selected = sa; selected_block = ba;
+        } else {
+                s = &bi; selected = sb; selected_block = bb;
+        }
+        if (s->total != total_blocks()) {
                 problem("superblock total differs from diskset", s->total, total_blocks());
+                ambiguous = 1;
+        }
         if (s->state != 0)
                 fprintf(stderr, "d6fsck: note: selected superblock is DIRTY\n");
 
@@ -441,12 +806,18 @@ static void check_filesystem(unsigned sa, unsigned sb)
         freemap = calloc((size_t)s->freemap_blocks * BLOCK_WORDS, sizeof(*freemap));
         summary = calloc((size_t)s->summary_blocks * BLOCK_WORDS, sizeof(*summary));
         used = calloc(total, 1);
+        crosslinked = calloc(total, 1);
         reachable = calloc(s->fcb_count, 1);
         refs = calloc(s->fcb_count, sizeof(*refs));
+        ref_parent = malloc((size_t)s->fcb_count * sizeof(*ref_parent));
         queue = calloc(s->fcb_count, sizeof(*queue));
         if (fcbs == NULL || infos == NULL || freemap == NULL || summary == NULL ||
-            used == NULL || reachable == NULL || refs == NULL || queue == NULL)
+            used == NULL || crosslinked == NULL || reachable == NULL || refs == NULL ||
+            ref_parent == NULL || queue == NULL)
                 die("out of memory");
+        for (i = 0; i < s->fcb_count; ++i)
+                ref_parent[i] = ~0U;
+        bad_phys = load_badmap();
 
         for (b = 0; b < fcb_blocks; ++b) {
                 uint64_t block[BLOCK_WORDS];
@@ -455,7 +826,8 @@ static void check_filesystem(unsigned sa, unsigned sb)
                         die("cannot read FCB table");
                 if ((b + 1) * BLOCK_WORDS > s->fcb_count * FCB_WORDS)
                         words = s->fcb_count * FCB_WORDS - b * BLOCK_WORDS;
-                memcpy(fcbs + (size_t)b * BLOCK_WORDS, block, words * sizeof(uint64_t));
+                memcpy(fcbs + (size_t)b * BLOCK_WORDS, block,
+                    words * sizeof(uint64_t));
         }
         for (b = 0; b < s->freemap_blocks; ++b)
                 if (read_logical(s->freemap_start + b,
@@ -470,31 +842,54 @@ static void check_filesystem(unsigned sa, unsigned sb)
         mark_range(used, total, s->fcb_start, fcb_blocks, 1);
         mark_range(used, total, s->freemap_start, s->freemap_blocks, 1);
         mark_range(used, total, s->summary_start, s->summary_blocks, 1);
+        for (i = 0; i < total; ++i) {
+                unsigned mi, local;
+                if (map_logical(i, &mi, &local) != 0)
+                        die("cannot map logical block while applying bad-block table");
+                if (bad_phys[mi][local])
+                        mark_range(used, total, i, 1U, 1U);
+        }
 
         for (i = 0; i < s->fcb_count; ++i) {
                 uint64_t *f = fcbs + (size_t)i * FCB_WORDS;
                 unsigned e;
                 if (fcb_decode(f, total, s->fcb_count, &infos[i]) != 0) {
                         problem("invalid FCB", i, ~0U);
+                        ambiguous = 1;
                         continue;
                 }
                 if (infos[i].type == D6FS_TYPE_FREE)
                         continue;
                 for (e = 0; e < infos[i].extents; ++e) {
-                        uint64_t run = f[006 + e];
-                        uint64_t count = ((uint64_t)extent_high(f[005], e) << EXTENT_LOW_BITS) |
+                        uint64_t run, count;
+                        unsigned start, blocks, p;
+                        run = f[006 + e];
+                        count = ((uint64_t)extent_high(f[005], e) << EXTENT_LOW_BITS) |
                             (run & EXTENT_LOW_MASK);
-                        mark_range(used, total, (unsigned)(run >> EXTENT_LOW_BITS),
-                            (unsigned)(count + 1), i + 2U);
+                        start = (unsigned)(run >> EXTENT_LOW_BITS);
+                        blocks = (unsigned)(count + 1);
+                        for (p = start; p < start + blocks; ++p) {
+                                if (p >= total) {
+                                        problem("block outside filesystem", p, ~0U);
+                                        ambiguous = 1;
+                                        continue;
+                                }
+                                if (used[p] != 0 && used[p] != i + 2U) {
+                                        problem("cross-linked block", p, ~0U);
+                                        crosslinked[p] = 1;
+                                        ambiguous = 1;
+                                } else
+                                        used[p] = (unsigned char)(i + 2U);
+                        }
                 }
         }
-        if (infos[s->root].type != D6FS_TYPE_DIR || infos[s->root].parent != s->root)
+        if (infos[s->root].type != D6FS_TYPE_DIR || infos[s->root].parent != s->root) {
                 problem("invalid root FCB", s->root, ~0U);
+                ambiguous = 1;
+        }
 
         reachable[s->root] = 1;
-        queue[qt = 0] = s->root;
-        qt = 1;
-        qh = 0;
+        queue[0] = s->root; qt = 1; qh = 0;
         while (qh < qt) {
                 unsigned di = queue[qh++];
                 uint64_t off;
@@ -502,14 +897,17 @@ static void check_filesystem(unsigned sa, unsigned sb)
                         continue;
                 if ((infos[di].size % DIRENT_WORDS) != 0) {
                         problem("directory size not multiple of dirent", di, ~0U);
+                        ambiguous = 1;
                         continue;
                 }
                 for (off = 0; off < infos[di].size; off += DIRENT_WORDS) {
-                        uint64_t ent[DIRENT_WORDS], name[4], hash;
+                        uint64_t ent[DIRENT_WORDS], name[4], hash, want_hash, want_meta;
                         unsigned j, child, type;
                         for (j = 0; j < DIRENT_WORDS; ++j)
                                 if (read_file_word(s, fcbs, di, off + j, &ent[j]) != 0) {
-                                        problem("cannot read directory entry", di, (unsigned)(off / DIRENT_WORDS));
+                                        problem("cannot read directory entry", di,
+                                            (unsigned)(off / DIRENT_WORDS));
+                                        ambiguous = 1;
                                         break;
                                 }
                         if (j != DIRENT_WORDS)
@@ -521,15 +919,29 @@ static void check_filesystem(unsigned sa, unsigned sb)
                         if ((ent[5] & HALF_MASK) != 0 || child >= s->fcb_count ||
                             child == s->root || infos[child].type == D6FS_TYPE_FREE) {
                                 problem("invalid directory child", di, child);
+                                ambiguous = 1;
                                 continue;
                         }
-                        if (type != infos[child].type)
-                                problem("directory cached type mismatch", di, child);
-                        if (hash != dir_hash(name))
-                                problem("directory hash mismatch", di, child);
-                        if (infos[child].parent != di)
-                                problem("FCB parent mismatch", child, di);
+                        want_hash = dir_hash(name);
+                        want_meta = (want_hash << DIRENT_HASH_SHIFT) |
+                            ((uint64_t)infos[child].type << DIRENT_TYPE_SHIFT);
+                        if (type != infos[child].type || hash != want_hash) {
+                                problem(type != infos[child].type ?
+                                    "directory cached type mismatch" : "directory hash mismatch",
+                                    di, child);
+                                if (repair_mode) {
+                                        stage_dir_patch(&dir_patches,
+                                            &dir_patch_count, &dir_patch_capacity,
+                                            di, off + 4U, want_meta);
+                                        ++planned;
+                                        changed_dirs = 1;
+                                }
+                        }
                         ++refs[child];
+                        if (ref_parent[child] == ~0U)
+                                ref_parent[child] = di;
+                        else if (ref_parent[child] != di)
+                                ambiguous = 1;
                         if (!reachable[child]) {
                                 reachable[child] = 1;
                                 if (qt < s->fcb_count)
@@ -539,68 +951,206 @@ static void check_filesystem(unsigned sa, unsigned sb)
         }
 
         for (i = 0; i < s->fcb_count; ++i) {
+                uint64_t *f;
                 if (infos[i].type == D6FS_TYPE_FREE)
                         continue;
                 if (i == s->root) {
-                        if (refs[i] != 0)
+                        if (refs[i] != 0) {
                                 problem("root referenced by directory", i, refs[i]);
-                } else if (refs[i] != 1)
+                                ambiguous = 1;
+                        }
+                } else if (refs[i] != 1) {
                         problem("FCB reference count", i, refs[i]);
-                if (!reachable[i])
+                        if (refs[i] > 1)
+                                ambiguous = 1;
+                }
+                if (reachable[i] && i != s->root && refs[i] == 1 &&
+                    infos[i].parent != ref_parent[i]) {
+                        problem("FCB parent mismatch", i, ref_parent[i]);
+                        if (repair_mode) {
+                                f = fcbs + (size_t)i * FCB_WORDS;
+                                f[4] = (uint64_t)ref_parent[i] << 18;
+                                infos[i].parent = ref_parent[i];
+                                changed_fcbs = 1;
+                                ++planned;
+                        }
+                }
+                if (!reachable[i]) {
+                        unsigned e;
+                        int unique;
                         problem("unreachable FCB", i, ~0U);
+                        unique = refs[i] == 0;
+                        f = fcbs + (size_t)i * FCB_WORDS;
+                        for (e = 0; unique && e < infos[i].extents; ++e) {
+                                uint64_t run, count;
+                                unsigned start, blocks, p;
+                                run = f[006 + e];
+                                count = ((uint64_t)extent_high(f[005], e) << EXTENT_LOW_BITS) |
+                                    (run & EXTENT_LOW_MASK);
+                                start = (unsigned)(run >> EXTENT_LOW_BITS);
+                                blocks = (unsigned)(count + 1);
+                                for (p = start; p < start + blocks; ++p)
+                                        if (p >= total || crosslinked[p] || used[p] != i + 2U) {
+                                                unique = 0;
+                                                break;
+                                        }
+                        }
+                        if (repair_mode && unique) {
+                                for (e = 0; e < infos[i].extents; ++e) {
+                                        uint64_t run, count;
+                                        unsigned start, blocks, p;
+                                        run = f[006 + e];
+                                        count = ((uint64_t)extent_high(f[005], e) << EXTENT_LOW_BITS) |
+                                            (run & EXTENT_LOW_MASK);
+                                        start = (unsigned)(run >> EXTENT_LOW_BITS);
+                                        blocks = (unsigned)(count + 1);
+                                        for (p = start; p < start + blocks; ++p)
+                                                used[p] = 0;
+                                }
+                                memset(f, 0, FCB_WORDS * sizeof(*f));
+                                infos[i].type = D6FS_TYPE_FREE;
+                                changed_fcbs = 1;
+                                ++planned;
+                                fprintf(stderr, "d6fsck: reclaimed orphan FCB %o\n", i);
+                        } else if (!unique)
+                                ambiguous = 1;
+                }
         }
 
         for (i = 0; i < total; ++i) {
                 unsigned mbi = i / BITS_PER_MAP_BLOCK;
                 unsigned bit = i % BITS_PER_MAP_BLOCK;
                 int allocated = get_bit(freemap + (size_t)mbi * BLOCK_WORDS, bit);
-                if ((used[i] != 0) != allocated)
-                        problem(used[i] != 0 ? "referenced block marked free" : "allocated leaked block", i, ~0U);
-        }
-        for (i = 0; i < s->freemap_blocks; ++i) {
-                unsigned first = i * BITS_PER_MAP_BLOCK;
-                unsigned limit = first + BITS_PER_MAP_BLOCK;
-                unsigned p;
-                int has_free = 0;
-                int summary_bit;
-                if (limit > total) limit = total;
-                for (p = first; p < limit; ++p) {
-                        unsigned bit = p - first;
-                        if (!get_bit(freemap + (size_t)i * BLOCK_WORDS, bit)) {
-                                has_free = 1;
-                                break;
+                int wanted = used[i] != 0;
+                if (wanted != allocated) {
+                        problem(wanted ? "referenced block marked free" :
+                            "allocated leaked block", i, ~0U);
+                        if (repair_mode && !crosslinked[i]) {
+                                set_bit(freemap + (size_t)mbi * BLOCK_WORDS, bit, wanted);
+                                changed_map = 1;
+                                ++planned;
                         }
                 }
-                summary_bit = get_bit(summary, i);
-                if (summary_bit != has_free)
-                        problem("free-summary mismatch", i, ~0U);
+        }
+        {
+                uint64_t *rebuilt;
+                rebuilt = calloc((size_t)s->summary_blocks * BLOCK_WORDS,
+                    sizeof(*rebuilt));
+                if (rebuilt == NULL)
+                        die("out of memory");
+                rebuild_summary(s, freemap, rebuilt);
+                if (memcmp(summary, rebuilt,
+                    (size_t)s->summary_blocks * BLOCK_WORDS * sizeof(*summary)) != 0) {
+                        problem("free-summary mismatch", 0, ~0U);
+                        if (repair_mode) {
+                                memcpy(summary, rebuilt,
+                                    (size_t)s->summary_blocks * BLOCK_WORDS * sizeof(*summary));
+                                changed_map = 1;
+                                ++planned;
+                        }
+                }
+                free(rebuilt);
         }
 
         fprintf(stderr, "d6fsck: selected superblock %o seq=%llo state=%s\n",
             selected, (unsigned long long)s->sequence,
             s->state == 0 ? "CLEAN" : "DIRTY");
+
+        if (repair_mode && !ambiguous) {
+                int metadata_changed;
+
+                metadata_changed = changed_fcbs || changed_dirs || changed_map;
+                if (metadata_changed) {
+                        uint64_t dirty_block[BLOCK_WORDS];
+                        uint64_t clean_block[BLOCK_WORDS];
+                        unsigned dirty_selected;
+
+                        /* Never expose a partially repaired filesystem under
+                         * an older CLEAN superblock.  Publish a newer DIRTY
+                         * copy before the first metadata write, then publish
+                         * an even newer CLEAN copy only after every staged
+                         * deterministic repair is durable. */
+                        if (publish_next_super(sa, sb, selected, selected_block,
+                            1U, &dirty_selected, dirty_block) != 0)
+                                die("cannot publish DIRTY state before repair");
+                        ++repairs;
+                        for (i = 0U; i < dir_patch_count; ++i)
+                                if (write_file_word(s, fcbs,
+                                    dir_patches[i].dir,
+                                    dir_patches[i].offset,
+                                    dir_patches[i].value) != 0)
+                                        die("cannot write repaired directory metadata");
+                        if (changed_fcbs && write_fcb_table(s, fcbs) != 0)
+                                die("cannot write repaired FCB table");
+                        if (changed_map) {
+                                if (write_map_blocks(s->freemap_start,
+                                    s->freemap_blocks, freemap) != 0 ||
+                                    write_map_blocks(s->summary_start,
+                                    s->summary_blocks, summary) != 0)
+                                        die("cannot write repaired allocation metadata");
+                        }
+                        if (publish_next_super(sa, sb, dirty_selected,
+                            dirty_block, 0U, NULL, clean_block) != 0)
+                                die("cannot publish CLEAN state after repair");
+                        ++repairs;
+                        repairs += planned;
+                } else if (!av || !bv || s->state != 0U) {
+                        uint64_t clean_block[BLOCK_WORDS];
+                        unsigned clean_selected;
+
+                        if (publish_next_super(sa, sb, selected, selected_block,
+                            0U, &clean_selected, clean_block) != 0)
+                                die("cannot repair superblock redundancy/state");
+                        ++repairs;
+                        fprintf(stderr,
+                            "d6fsck: repaired superblock copy %o (seq=%llo CLEAN)\n",
+                            clean_selected,
+                            (unsigned long long)clean_block[1]);
+                }
+        } else if (repair_mode && ambiguous)
+                fprintf(stderr, "d6fsck: ambiguous corruption remains; no repairs written\n");
+
         if (errors == 0)
                 fprintf(stderr, "d6fsck: %u blocks, %u FCBs: clean\n",
                     total, s->fcb_count);
 
-        free(queue); free(refs); free(reachable); free(used);
-        free(summary); free(freemap); free(infos); free(fcbs);
+        free_badmap(bad_phys);
+        free(dir_patches);
+        free(queue); free(ref_parent); free(refs); free(reachable);
+        free(crosslinked); free(used); free(summary); free(freemap);
+        free(infos); free(fcbs);
+        return ambiguous ? -1 : 0;
 }
 
 static void usage(void)
 {
-        fprintf(stderr, "usage: d6fsck -n members -d diskdir\n");
+        fprintf(stderr, "usage: d6fsck [-r] -n members -d diskdir\n");
         exit(2);
+}
+
+static void close_members(void)
+{
+        unsigned i;
+
+        for (i = 0; i < member_count; ++i) {
+                if (members[i].fp != NULL)
+                        fclose(members[i].fp);
+                members[i].fp = NULL;
+        }
+        member_count = 0;
 }
 
 int main(int argc, char **argv)
 {
         const char *dir = NULL;
-        unsigned n = 0, sa, sb, i;
-        int a;
+        unsigned n = 0, sa, sb;
+        int a, requested_repair;
 
+        requested_repair = 0;
         for (a = 1; a < argc; ++a) {
-                if (strcmp(argv[a], "-n") == 0 && a + 1 < argc)
+                if (strcmp(argv[a], "-r") == 0)
+                        requested_repair = 1;
+                else if (strcmp(argv[a], "-n") == 0 && a + 1 < argc)
                         n = (unsigned)strtoul(argv[++a], NULL, 0);
                 else if (strcmp(argv[a], "-d") == 0 && a + 1 < argc)
                         dir = argv[++a];
@@ -609,9 +1159,29 @@ int main(int argc, char **argv)
         }
         if (dir == NULL || n == 0 || n > MAX_MEMBERS)
                 usage();
+
+        repair_mode = requested_repair;
+        errors = repairs = 0;
         open_members(dir, n, &sa, &sb);
-        check_filesystem(sa, sb);
-        for (i = 0; i < member_count; ++i)
-                fclose(members[i].fp);
+        (void)check_filesystem(sa, sb);
+        close_members();
+
+        if (requested_repair && repairs != 0) {
+                unsigned repaired = repairs;
+                fprintf(stderr, "d6fsck: %u deterministic repairs written; verifying\n",
+                    repaired);
+                repair_mode = 0;
+                errors = repairs = 0;
+                open_members(dir, n, &sa, &sb);
+                (void)check_filesystem(sa, sb);
+                close_members();
+                if (errors == 0) {
+                        fprintf(stderr, "d6fsck: repair verification: clean\n");
+                        return 0;
+                }
+                fprintf(stderr, "d6fsck: repair verification failed with %u error(s)\n",
+                    errors);
+                return 1;
+        }
         return errors == 0 ? 0 : 1;
 }
