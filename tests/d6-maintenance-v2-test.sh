@@ -14,7 +14,7 @@ cat > "$work/init.words" <<'EOT'
 076543210765
 EOT
 ./mkdsk -n 3 -m clean -p "$work/payload.words" -o "$work/disks" \
-    --d6fs-layout --logstore-blocks 3 --badmap-blocks 1 \
+    --d6fs-layout --logstore-blocks 4 --badmap-blocks 1 \
     --swap-tail-blocks 2 --member-sectors 02000,01400,01000 >/dev/null
 ./mkd6fs -n 3 -d "$work/disks" \
     -f /SYSTEM/INIT:"$work/init.words":0755:words >/dev/null
@@ -100,10 +100,10 @@ if ./d6fsck -n 3 -d "$work/disks" >"$work/bad-drift.out" 2>&1; then
 fi
 ./d6fsck -r -n 3 -d "$work/disks" >"$work/bad-repair.out" 2>&1
 grep -q 'repair verification: clean' "$work/bad-repair.out"
-./d6log -n 3 -d "$work/disks" --init >/dev/null
-./d6log -n 3 -d "$work/disks" --append -s 3 -S 0123 -t 1234 -p 0777 >/dev/null
-./d6log -n 3 -d "$work/disks" --append -s 5 -S 0456 -t 5678 -p 01234 -p 05670 >/dev/null
-./d6log -n 3 -d "$work/disks" --dump >"$work/log.out"
+./logstore -n 3 -d "$work/disks" --init >/dev/null
+./logstore -n 3 -d "$work/disks" --append -s 3 -S 0123 -t 1234 -p 0777 >/dev/null
+./logstore -n 3 -d "$work/disks" --append -s 5 -S 0456 -t 5678 -p 01234 -p 05670 >/dev/null
+./logstore -n 3 -d "$work/disks" --dump >"$work/log.out"
 grep -q 'seq=1 ' "$work/log.out"
 grep -q 'seq=2 ' "$work/log.out"
 cp -R "$work/disks" "$work/prepack-source"

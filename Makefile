@@ -10,7 +10,7 @@ RM ?= rm -f
 CC ?= cc
 CFLAGS ?= -Wall -Wextra -O2 -std=c99
 
-CTOOLS = mkdsk mkd6fs d6fsck packfs d6bad d6log d6swap mkdt mkstream mktap words2pt dlink darc p10run pdp10-objdump mkinitfs0
+CTOOLS = mkdsk mkd6fs d6fsck packfs d6bad logstore d6swap mkdt mkstream mktap words2pt dlink darc p10run pdp10-objdump mkinitfs0
 ALIASES = pdp10-dec-none-darc pdp10-dec-none-objdump mkinitfs
 SIMH_INIS = simh/pdp6.ini simh/pdp10-ka.ini simh/pdp10-ki.ini \
 	simh/pdp10-kl.ini simh/pdp10-ks.ini
@@ -35,8 +35,8 @@ packfs: packfs.c d6maint.c d6maint.h
 d6bad: d6bad.c d6maint.c d6maint.h
 	$(CC) $(CFLAGS) -o $@ d6bad.c d6maint.c
 
-d6log: d6log.c d6maint.c d6maint.h
-	$(CC) $(CFLAGS) -o $@ d6log.c d6maint.c
+logstore: logstore.c d6maint.c d6maint.h
+	$(CC) $(CFLAGS) -o $@ logstore.c d6maint.c
 
 d6swap: d6swap.c d6maint.c d6maint.h
 	$(CC) $(CFLAGS) -o $@ d6swap.c d6maint.c
@@ -77,7 +77,7 @@ pdp10-dec-none-objdump: pdp10-objdump
 mkinitfs: mkinitfs0
 	$(LN_S) mkinitfs0 $@
 
-test: dlink darc p10run pdp10-objdump mktap mkinitfs mkdsk mkd6fs d6fsck packfs d6bad d6log d6swap
+test: dlink darc p10run pdp10-objdump mktap mkinitfs mkdsk mkd6fs d6fsck packfs d6bad logstore d6swap
 	$(CC) $(CFLAGS) -std=c89 -I. -o tests/dobj-test tests/dobj-test.c dobj.c
 	./tests/dobj-test
 	$(CC) $(CFLAGS) -I. -o tests/pdp10-objdump-mk tests/pdp10-objdump-test.c dobj.c
