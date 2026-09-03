@@ -508,6 +508,14 @@ static void compile_source(const struct options *o, const char *gcc,
         die("out of memory");
     ac = 0;
     if (dot != NULL && strcmp(dot, ".c") == 0) {
+        char asm_path[PATHSZ];
+        char stem[MAX_NAME];
+        char leaf[MAX_NAME + 32];
+        char *asv[6];
+
+        stem_name(stem, src);
+        sprintf(leaf, "p10run-%03d-%s.s", n, stem);
+        make_path2(asm_path, sizeof(asm_path), work, leaf);
         copy_text(march, sizeof(march), "-march=");
         cat_text(march, sizeof(march), machine_march(o->machine));
         av[ac++] = (char *)gcc;
@@ -516,11 +524,27 @@ static void compile_source(const struct options *o, const char *gcc,
         av[ac++] = (char *)"-fno-common";
         av[ac++] = march;
         for (i = 0; i < o->gcc_extra.n; i++) av[ac++] = o->gcc_extra.v[i];
-        av[ac++] = (char *)"-c";
+        av[ac++] = (char *)"-S";
         av[ac++] = (char *)src;
         av[ac++] = (char *)"-o";
-        av[ac++] = obj;
+        av[ac++] = asm_path;
         av[ac] = NULL;
+        if (run_wait(av, NULL, NULL, 30) != 0) {
+            free(av);
+            die_path("compile failed", src);
+        }
+        asv[0] = (char *)as;
+        asv[1] = (char *)"-c";
+        asv[2] = (char *)"-o";
+        asv[3] = obj;
+        asv[4] = asm_path;
+        asv[5] = NULL;
+        if (run_wait(asv, NULL, NULL, 30) != 0) {
+            free(av);
+            die_path("assemble failed", src);
+        }
+        free(av);
+        return;
     } else {
         av[ac++] = (char *)as;
         av[ac++] = (char *)"-c";
