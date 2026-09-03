@@ -89,7 +89,6 @@ struct super_info {
         uint64_t sequence;
         unsigned state;
         uint64_t fsid[2];
-        uint64_t dsid[2];
         unsigned total;
         unsigned root;
         unsigned fcb_start;
@@ -376,13 +375,13 @@ static int super_decode(const uint64_t sb[SUPER_WORDS], unsigned disk_blocks,
 {
         if ((sb[0] & ~077ULL) != (D6FS_MAGIC & ~077ULL) ||
             (sb[0] & 077ULL) != D6FS_VERSION || sb[2] > 1 ||
+            sb[5] != 0 || sb[6] != 0 ||
             sb[7] == 0 || sb[7] > disk_blocks || sb[012] == 0 ||
             sb[010] >= sb[012])
                 return -1;
         s->sequence = sb[1];
         s->state = (unsigned)sb[2];
         s->fsid[0] = sb[3]; s->fsid[1] = sb[4];
-        s->dsid[0] = sb[5]; s->dsid[1] = sb[6];
         s->total = (unsigned)sb[7];
         s->root = (unsigned)sb[010];
         s->fcb_start = (unsigned)sb[011];
@@ -404,7 +403,6 @@ static int super_decode(const uint64_t sb[SUPER_WORDS], unsigned disk_blocks,
 static int same_identity(const struct super_info *a, const struct super_info *b)
 {
         return a->fsid[0] == b->fsid[0] && a->fsid[1] == b->fsid[1] &&
-            a->dsid[0] == b->dsid[0] && a->dsid[1] == b->dsid[1] &&
             a->total == b->total && a->root == b->root &&
             a->fcb_start == b->fcb_start && a->fcb_count == b->fcb_count &&
             a->freemap_start == b->freemap_start &&

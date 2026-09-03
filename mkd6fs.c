@@ -720,7 +720,7 @@ static void format_fs(unsigned super_a, unsigned super_b)
         uint64_t block[BLOCK_WORDS];
         uint64_t fcb[FCB_WORDS];
         uint64_t *freemap, *summary;
-        uint64_t fsid0, fsid1, dsid0, dsid1;
+        uint64_t fsid0, fsid1;
 
         total = total_blocks();
         fcb_count = 64U;
@@ -806,14 +806,12 @@ static void format_fs(unsigned super_a, unsigned super_b)
 
         fsid0 = deterministic_id(012345670123ULL, total);
         fsid1 = deterministic_id(076543210765ULL, total);
-        dsid0 = deterministic_id(011111122222ULL, total);
-        dsid1 = deterministic_id(033333344444ULL, total);
         memset(block, 0, sizeof(block));
         block[0] = (D6FS_MAGIC & ~077ULL) | D6FS_VERSION;
         block[1] = 1U;
         block[2] = D6FS_STATE_CLEAN;
         block[3] = fsid0; block[4] = fsid1;
-        block[5] = dsid0; block[6] = dsid1;
+        block[5] = 0; block[6] = 0;
         block[7] = total;
         block[010] = 0U;
         block[011] = fcb_start;
