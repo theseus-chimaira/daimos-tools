@@ -430,6 +430,37 @@ static void parse_file_spec(const char *spec)
         free(copy);
 }
 
+static void parse_dir_spec(const char *spec)
+{
+        char *copy, *path, *mode_s, *leaf, *p;
+        unsigned parent, mode;
+        int found;
+
+        copy = malloc(strlen(spec) + 1U);
+        if (copy == NULL)
+                die("out of memory");
+        strcpy(copy, spec);
+        path = copy;
+        p = strrchr(path, ':');
+        if (p == NULL)
+                die("directory spec requires PATH:MODE");
+        *p++ = '\0';
+        mode_s = p;
+        mode = (unsigned)strtoul(mode_s, NULL, 8);
+        if (mode > 07777U)
+                die("invalid directory mode");
+        parent = ensure_path_dirs(path, &leaf);
+        found = find_child(parent, leaf);
+        if (found < 0)
+                (void)add_node(parent, leaf, D6FS_TYPE_DIR, mode);
+        else {
+                if (nodes[found].type != D6FS_TYPE_DIR)
+                        die("directory path conflicts with non-directory");
+                nodes[found].mode = mode;
+        }
+        free(copy);
+}
+
 static void parse_symlink_spec(const char *spec)
 {
         char *copy, *path, *target, *mode_s, *leaf, *p;
@@ -839,19 +870,22 @@ static void usage(void)
 {
         fprintf(stderr,
             "usage: mkd6fs -n members -d diskdir "
-            "[-f PATH:HOST:MODE:dxr|words] [-l PATH:TARGET:MODE] [...]\n");
+            "[-D PATH:MODE] [-f PATH:HOST:MODE:dxr|words] "
+            "[-l PATH:TARGET:MODE] [...]\n");
         exit(2);
 }
 
 int main(int argc, char **argv)
 {
         const char *dir;
+        const char *dirs[MAX_NODES];
         const char *specs[MAX_NODES];
         const char *links[MAX_NODES];
-        unsigned nspec, nlink, n, super_a, super_b, i;
+        unsigned ndir, nspec, nlink, n, super_a, super_b, i;
         int a;
 
         dir = NULL;
+        ndir = 0U;
         nspec = 0U;
         nlink = 0U;
         n = 0U;
@@ -865,7 +899,11 @@ int main(int argc, char **argv)
                         n = (unsigned)strtoul(argv[++a], NULL, 0);
                 else if (strcmp(argv[a], "-d") == 0 && a + 1 < argc)
                         dir = argv[++a];
-                else if (strcmp(argv[a], "-f") == 0 && a + 1 < argc) {
+                else if (strcmp(argv[a], "-D") == 0 && a + 1 < argc) {
+                        if (ndir >= MAX_NODES)
+                                die("too many directory specs");
+                        dirs[ndir++] = argv[++a];
+                } else if (strcmp(argv[a], "-f") == 0 && a + 1 < argc) {
                         if (nspec >= MAX_NODES)
                                 die("too many file specs");
                         specs[nspec++] = argv[++a];
@@ -877,8 +915,10 @@ int main(int argc, char **argv)
                         usage();
         }
         if (dir == NULL || n == 0U || n > MAX_MEMBERS ||
-            (nspec == 0U && nlink == 0U))
+            (ndir == 0U && nspec == 0U && nlink == 0U))
                 usage();
+        for (i = 0U; i < ndir; ++i)
+                parse_dir_spec(dirs[i]);
         for (i = 0U; i < nspec; ++i)
                 parse_file_spec(specs[i]);
         for (i = 0U; i < nlink; ++i)

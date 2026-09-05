@@ -92,6 +92,7 @@ test: dlink darc p10run pdp10-objdump mktap mkinitfs mkdsk mkd6fs d6fsck packfs 
 	./tests/mkinitfs0-test.sh
 	./tests/mkinitfs0-dxr-v1-test.sh
 	TMPDIR='$(TMPDIR)' ./tests/mkdsk-member-sectors-v1-test.sh
+	TMPDIR='$(TMPDIR)' ./tests/mkd6fs-dir-v1-test.sh
 	TMPDIR='$(TMPDIR)' ./tests/d6fsck-v1-test.sh
 	TMPDIR='$(TMPDIR)' ./tests/d6fsck-repair-v2-test.sh
 	TMPDIR='$(TMPDIR)' ./tests/d6-maintenance-v2-test.sh
