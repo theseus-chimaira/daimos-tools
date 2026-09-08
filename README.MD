@@ -80,3 +80,15 @@ package.  The package contains initialized words, BSS size, and a two-bit-per-
 word LH18/RH18 relocation map; absolute definitions supplied with `-A map` are
 resolved normally and are not marked for runtime relocation.  This does not
 require a second compile or sizing link pass.
+
+
+## DXR purity contract
+
+`dlink` records executable text purity in the high flag bits of the DXR1 BSS
+halfword.  `--pure` is an explicit program contract: executable text will not
+be modified at runtime.  `--impure` forces the conservative state.  Without
+either option the state is UNKNOWN unless the linker can prove a direct,
+unindexed, non-indirect store into final TEXT, in which case it records
+IMPURE automatically.  UNKNOWN is not a proof of purity and must be treated
+like IMPURE by swapping code.  A proven text write contradicts `--pure` and
+causes the link to fail.

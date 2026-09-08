@@ -6,6 +6,13 @@
 #include <limits.h>
 
 #define HALF_MASK 0777777UL
+#define DXR_BSS_MASK 0177777UL
+#define DXR_F_PURE   0200000UL
+#define DXR_F_IMPURE 0400000UL
+
+#define PURITY_UNKNOWN 0
+#define PURITY_PURE    1
+#define PURITY_IMPURE  2
 struct link_object {
     struct dobj_object obj;
     unsigned long text_base;
@@ -39,6 +46,58 @@ struct linker {
     int def_count;
     int def_cap;
 };
+
+
+static int opcode_writes_ea(unsigned long op)
+{
+    if (op == 0136UL || op == 0202UL || op == 0203UL ||
+        op == 0206UL || op == 0207UL || op == 0212UL ||
+        op == 0213UL || op == 0216UL || op == 0217UL ||
+        op == 0222UL || op == 0223UL || op == 0226UL ||
+        op == 0227UL || op == 0232UL || op == 0233UL ||
+        op == 0236UL || op == 0237UL || op == 0250UL ||
+        op == 0262UL || op == 0264UL || op == 0266UL ||
+        op == 0272UL || op == 0273UL || op == 0276UL ||
+        op == 0277UL)
+        return 1;
+    if (op >= 0350UL && op <= 0357UL)
+        return 1;
+    if (op >= 0370UL && op <= 0377UL)
+        return 1;
+    if (op >= 0400UL && op <= 0477UL && (op & 3UL) >= 2UL)
+        return 1;
+    if (op >= 0500UL && op <= 0577UL && (op & 3UL) >= 2UL)
+        return 1;
+    return 0;
+}
+
+/*
+ * Prove only the easy case: an instruction with an unindexed, non-indirect
+ * effective address which is a memory-writing operand in the final TEXT
+ * range.  Failure to find such an instruction is deliberately not a proof
+ * of purity; computed/indirect stores and block/byte operations can hide a
+ * text write.
+ */
+static int definite_text_write(const struct dobj_word *image,
+                               unsigned long text_words,
+                               unsigned long *where)
+{
+    unsigned long i;
+    for (i = 0UL; i < text_words; i++) {
+        unsigned long op, indirect, index, ea;
+        op = (image[i].lh >> 9) & 0777UL;
+        indirect = (image[i].lh >> 4) & 1UL;
+        index = image[i].lh & 017UL;
+        ea = image[i].rh & HALF_MASK;
+        if (!indirect && index == 0UL && ea < text_words &&
+            opcode_writes_ea(op)) {
+            if (where != NULL)
+                *where = i;
+            return 1;
+        }
+    }
+    return 0;
+}
 
 static void *grow_array(void *p, int *cap, size_t elem_size)
 {
@@ -427,7 +486,7 @@ static int write_map(const char *name, struct linker *l)
     return 0;
 }
 
-static int write_dxr(const char *name, struct linker *l)
+static int write_dxr(const char *name, struct linker *l, int purity_request)
 {
     unsigned long tw, dw, bw, iw, rw;
     struct dobj_word *image;
@@ -435,6 +494,8 @@ static int write_dxr(const char *name, struct linker *l)
     struct dobj_word h;
     unsigned long pos;
     unsigned long entry;
+    unsigned long flags;
+    unsigned long text_write_at;
     int i;
     FILE *f;
 
@@ -457,6 +518,20 @@ static int write_dxr(const char *name, struct linker *l)
     if (apply_relocs(l, image, relmap, NULL) != 0) {
         free(image); free(relmap); return -1;
     }
+    flags = 0UL;
+    if (definite_text_write(image, tw, &text_write_at)) {
+        flags = DXR_F_IMPURE;
+        if (purity_request == PURITY_PURE) {
+            fprintf(stderr,
+                    "dlink: --pure contradicted by definite TEXT write at %06lo\n",
+                    text_write_at);
+            free(image); free(relmap); return -1;
+        }
+    } else if (purity_request == PURITY_IMPURE) {
+        flags = DXR_F_IMPURE;
+    } else if (purity_request == PURITY_PURE) {
+        flags = DXR_F_PURE;
+    }
     entry = 0UL;
     for (i = 0; i < l->object_count; i++) {
         struct dobj_object *o;
@@ -478,7 +553,7 @@ static int write_dxr(const char *name, struct linker *l)
     h = sixbit_word("DXR1  ");
     h.rh = entry;
     if (dobj_write_word(f, h) != 0 ||
-        dobj_write_word(f, dobj_word_halves(iw, bw)) != 0) goto bad;
+        dobj_write_word(f, dobj_word_halves(iw, (bw & DXR_BSS_MASK) | flags)) != 0) goto bad;
     for (pos = 0UL; pos < iw; pos++) if (dobj_write_word(f, image[pos]) != 0) goto bad;
     for (pos = 0UL; pos < rw; pos++) if (dobj_write_word(f, relmap[pos]) != 0) goto bad;
     if (fclose(f) != 0) { remove(name); free(image); free(relmap); return -1; }
@@ -668,7 +743,7 @@ static void cleanup(struct linker *l)
 
 static void usage(void)
 {
-    fprintf(stderr, "usage: dlink -o out.dxr [-M out.map] [-b octal] [-A map] [-R out.dobj -N symbol [-X export] ...] input.dobj|library.darc ...\n");
+    fprintf(stderr, "usage: dlink -o out.dxr [--pure|--impure] [-M out.map] [-b octal] [-A map] [-R out.dobj -N symbol [-X export] ...] input.dobj|library.darc ...\n");
 }
 
 int main(int argc, char **argv)
@@ -685,6 +760,7 @@ int main(int argc, char **argv)
     int i;
     int first;
     int rc;
+    int purity_request;
 
     memset(&l, 0, sizeof(l));
     out = NULL;
@@ -694,11 +770,20 @@ int main(int argc, char **argv)
     mres_symbol = NULL;
     mres_export_count = 0;
     l.image_base = 0UL;
+    purity_request = PURITY_UNKNOWN;
     first = 1;
     while (first < argc && argv[first][0] == '-') {
         if (strcmp(argv[first], "-o") == 0 && first + 1 < argc) {
             out = argv[first + 1];
             first += 2;
+        } else if (strcmp(argv[first], "--pure") == 0) {
+            if (purity_request == PURITY_IMPURE) { usage(); return 1; }
+            purity_request = PURITY_PURE;
+            first++;
+        } else if (strcmp(argv[first], "--impure") == 0) {
+            if (purity_request == PURITY_PURE) { usage(); return 1; }
+            purity_request = PURITY_IMPURE;
+            first++;
         } else if (strcmp(argv[first], "-M") == 0 && first + 1 < argc) {
             map = argv[first + 1];
             first += 2;
@@ -763,7 +848,7 @@ int main(int argc, char **argv)
     }
     if (resolve_archives(&l) != 0 || check_undefined(&l) != 0)
         goto done;
-    if (write_dxr(out, &l) != 0) {
+    if (write_dxr(out, &l, purity_request) != 0) {
         fprintf(stderr, "dlink: link failed\n");
         goto done;
     }

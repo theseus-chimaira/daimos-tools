@@ -73,6 +73,70 @@ static void make_plain(struct dobj_object *o, unsigned long marker)
         o->text[0] = dobj_word_halves(marker, 0UL);
 }
 
+
+static int check_purity_flags(void)
+{
+    struct dobj_object o;
+    struct dobj_word w;
+    FILE *f;
+    int rc;
+
+    make_plain(&o, 0202UL << 9);
+    if (o.text == NULL || save_object("tests/impure-write.dobj", &o) != 0) {
+        dobj_free(&o);
+        return -1;
+    }
+    dobj_free(&o);
+    rc = system("./dlink -o tests/impure-write.dxr tests/impure-write.dobj");
+    if (rc != 0)
+        return -1;
+    f = fopen("tests/impure-write.dxr", "rb");
+    if (f == NULL || dobj_read_word(f, &w) != 0 ||
+        dobj_read_word(f, &w) != 0 || (w.rh & 0400000UL) == 0UL) {
+        if (f != NULL) fclose(f);
+        return -1;
+    }
+    fclose(f);
+    rc = system("./dlink --pure -o tests/bad-pure.dxr tests/impure-write.dobj >/dev/null 2>&1");
+    if (rc == 0)
+        return -1;
+
+    make_plain(&o, 0254000UL);
+    if (o.text == NULL || save_object("tests/purity-unknown.dobj", &o) != 0) {
+        dobj_free(&o);
+        return -1;
+    }
+    dobj_free(&o);
+    rc = system("./dlink --pure -o tests/pure.dxr tests/purity-unknown.dobj");
+    if (rc != 0)
+        return -1;
+    f = fopen("tests/pure.dxr", "rb");
+    if (f == NULL || dobj_read_word(f, &w) != 0 ||
+        dobj_read_word(f, &w) != 0 || (w.rh & 0200000UL) == 0UL ||
+        (w.rh & 0400000UL) != 0UL) {
+        if (f != NULL) fclose(f);
+        return -1;
+    }
+    fclose(f);
+    rc = system("./dlink --impure -o tests/forced-impure.dxr tests/purity-unknown.dobj");
+    if (rc != 0)
+        return -1;
+    f = fopen("tests/forced-impure.dxr", "rb");
+    if (f == NULL || dobj_read_word(f, &w) != 0 ||
+        dobj_read_word(f, &w) != 0 || (w.rh & 0400000UL) == 0UL) {
+        if (f != NULL) fclose(f);
+        return -1;
+    }
+    fclose(f);
+
+    remove("tests/impure-write.dobj");
+    remove("tests/impure-write.dxr");
+    remove("tests/purity-unknown.dobj");
+    remove("tests/pure.dxr");
+    remove("tests/forced-impure.dxr");
+    return 0;
+}
+
 static int check_many_inputs(void)
 {
     enum { MANY_COUNT = 300 };
@@ -292,6 +356,10 @@ int main(void)
     rc = system("./dlink -o tests/bad-dup.dxr tests/helper.dobj tests/helper.dobj >/dev/null 2>&1");
     if (rc == 0) {
         fprintf(stderr, "dobj-test: duplicate global was accepted\n");
+        return 1;
+    }
+    if (check_purity_flags() != 0) {
+        fprintf(stderr, "dobj-test: DXR purity contract failed\n");
         return 1;
     }
     if (check_many_inputs() != 0) {
