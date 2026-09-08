@@ -394,7 +394,7 @@ static unsigned int *load_word_file_nonets(const char *path, int *nout)
 	return out;
 }
 
-/* Read a DXR1 executable and return its words as nonets.
+/* Read a DXR1/DXR2 executable and return its words as nonets.
    Each DXR container word is a 36-bit PDP-10 word in the low 36 bits of an
    8-byte little-endian value.  Layout: bits 0-17 = rh, bits 18-31 = lh low
    14, bits 32-35 = lh high 4; bits 36-63 must be zero. */
@@ -446,18 +446,31 @@ static unsigned int *load_dxr_nonets(const char *path, int *nout)
 	}
 	free(buf);
 
-	/* Validate SIXBIT("DXR") magic in the left half of word[0]. */
+	/* DXR has a two-word base header.  The current extension adds one
+	 * word containing text_words,,SIXBIT/TX2/.  Length distinguishes the
+	 * legacy and extended forms without stealing another BSS flag bit. */
 	dxr_lh = ((word_t)('D' - 040) << 12)
 	        | ((word_t)('X' - 040) <<  6)
 	        |  (word_t)('R' - 040);
 	if (((words[0] >> 18) & 0777777ULL) != dxr_lh)
-		die("%s: not a DXR1 executable", path);
-
+		die("%s: not a DXR executable", path);
 	image_words = (int)((words[1] >> 18) & 0777777ULL);
 	reloc_words = (image_words + 35) / 36;
-	if (nwords != 2 + image_words + reloc_words)
-		die("%s: DXR length is %d words, expected %d",
-		    path, nwords, 2 + image_words + reloc_words);
+	if (nwords == 2 + image_words + reloc_words)
+		;
+	else if (nwords == 3 + image_words + reloc_words) {
+		word_t tx2 = ((word_t)('T' - 040) << 12)
+		           | ((word_t)('X' - 040) << 6)
+		           |  (word_t)('2' - 040);
+		word_t text_words = (words[2] >> 18) & 0777777ULL;
+		if ((words[2] & 0777777ULL) != tx2 ||
+		    text_words > (word_t)image_words)
+			die("%s: invalid DXR2 text metadata", path);
+		;
+	} else
+		die("%s: DXR length is %d words, expected %d or %d",
+		    path, nwords, 2 + image_words + reloc_words,
+		    3 + image_words + reloc_words);
 
 	out = (unsigned int *)xmalloc((size_t)nwords * 4 * sizeof(unsigned int));
 	for (i = 0; i < nwords; i++) {

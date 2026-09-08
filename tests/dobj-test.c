@@ -201,8 +201,11 @@ static int check_dxr(const char *name)
     int i;
     f = fopen(name, "rb");
     if (f == NULL) return -1;
-    if (dobj_read_word(f, &w) != 0 || w.rh != 0UL) goto bad;
+    if (dobj_read_word(f, &w) != 0 || w.lh != 0447062UL ||
+        w.rh != 0UL) goto bad;
     if (dobj_read_word(f, &w) != 0 || w.lh != 4UL || w.rh != 0UL) goto bad;
+    if (dobj_read_word(f, &w) != 0 || w.lh != 4UL ||
+        w.rh != 0647022UL) goto bad;
     for (i = 0; i < 4; i++) if (dobj_read_word(f, &image[i]) != 0) goto bad;
     if (dobj_read_word(f, &map) != 0) goto bad;
     fclose(f);

@@ -532,7 +532,7 @@ static int write_dxr(const char *name, struct linker *l, int purity_request)
     } else if (purity_request == PURITY_PURE) {
         flags = DXR_F_PURE;
     }
-    entry = 0UL;
+    entry = l->image_base;
     for (i = 0; i < l->object_count; i++) {
         struct dobj_object *o;
         if (l->objects[i].obj.entry_symbol == 0UL) continue;
@@ -548,12 +548,18 @@ static int write_dxr(const char *name, struct linker *l, int purity_request)
         }
         break;
     }
+    if (entry < l->image_base || entry - l->image_base >= iw) {
+        fprintf(stderr, "dlink: entry point is outside linked image\n");
+        free(image); free(relmap); return -1;
+    }
+    entry -= l->image_base;
     f = fopen(name, "wb");
     if (f == NULL) { free(image); free(relmap); return -1; }
-    h = sixbit_word("DXR1  ");
+    h = sixbit_word("DXR2  ");
     h.rh = entry;
     if (dobj_write_word(f, h) != 0 ||
-        dobj_write_word(f, dobj_word_halves(iw, (bw & DXR_BSS_MASK) | flags)) != 0) goto bad;
+        dobj_write_word(f, dobj_word_halves(iw, (bw & DXR_BSS_MASK) | flags)) != 0 ||
+        dobj_write_word(f, dobj_word_halves(tw, sixbit_word("TX2   ").lh)) != 0) goto bad;
     for (pos = 0UL; pos < iw; pos++) if (dobj_write_word(f, image[pos]) != 0) goto bad;
     for (pos = 0UL; pos < rw; pos++) if (dobj_write_word(f, relmap[pos]) != 0) goto bad;
     if (fclose(f) != 0) { remove(name); free(image); free(relmap); return -1; }
