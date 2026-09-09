@@ -7,8 +7,8 @@ INCLUDEDIR ?= $(PDP10_PREFIX)/include
 INSTALL ?= install
 LN_S ?= ln -sf
 RM ?= rm -f
-CC ?= cc
-CFLAGS ?= -Wall -Wextra -O2 -std=c99
+HOSTCC ?= cc
+HOSTCFLAGS ?= -Wall -Wextra -O2 -std=c99
 
 CTOOLS = mkdsk mkd6fs d6fsck packfs d6bad logstore d6swap mkdt mkstream mktap words2pt dlink darc p10run pdp10-objdump mkinitfs0 mkbootbanner
 ALIASES = pdp10-dec-none-darc pdp10-dec-none-objdump mkinitfs
@@ -21,55 +21,55 @@ SIMH_NAMES = pdp6.ini pdp10-ka.ini pdp10-ki.ini pdp10-kl.ini pdp10-ks.ini
 all: $(CTOOLS) $(ALIASES)
 
 mkdsk: mkdsk.c
-	$(CC) $(CFLAGS) -o $@ mkdsk.c
+	$(HOSTCC) $(HOSTCFLAGS) -o $@ mkdsk.c
 
 mkd6fs: mkd6fs.c d6maint.c d6maint.h
-	$(CC) $(CFLAGS) -o $@ mkd6fs.c d6maint.c
+	$(HOSTCC) $(HOSTCFLAGS) -o $@ mkd6fs.c d6maint.c
 
 d6fsck: d6fsck.c
-	$(CC) $(CFLAGS) -o $@ d6fsck.c
+	$(HOSTCC) $(HOSTCFLAGS) -o $@ d6fsck.c
 
 packfs: packfs.c d6maint.c d6maint.h
-	$(CC) $(CFLAGS) -o $@ packfs.c d6maint.c
+	$(HOSTCC) $(HOSTCFLAGS) -o $@ packfs.c d6maint.c
 
 d6bad: d6bad.c d6maint.c d6maint.h
-	$(CC) $(CFLAGS) -o $@ d6bad.c d6maint.c
+	$(HOSTCC) $(HOSTCFLAGS) -o $@ d6bad.c d6maint.c
 
 logstore: logstore.c d6maint.c d6maint.h
-	$(CC) $(CFLAGS) -o $@ logstore.c d6maint.c
+	$(HOSTCC) $(HOSTCFLAGS) -o $@ logstore.c d6maint.c
 
 d6swap: d6swap.c d6maint.c d6maint.h
-	$(CC) $(CFLAGS) -o $@ d6swap.c d6maint.c
+	$(HOSTCC) $(HOSTCFLAGS) -o $@ d6swap.c d6maint.c
 
 mkdt: mkdt.c
-	$(CC) $(CFLAGS) -o $@ mkdt.c
+	$(HOSTCC) $(HOSTCFLAGS) -o $@ mkdt.c
 
 mkstream: mkstream.c
-	$(CC) $(CFLAGS) -o $@ mkstream.c
+	$(HOSTCC) $(HOSTCFLAGS) -o $@ mkstream.c
 
 mktap: mktap.c
-	$(CC) $(CFLAGS) -o $@ mktap.c
+	$(HOSTCC) $(HOSTCFLAGS) -o $@ mktap.c
 
 words2pt: words2pt.c
-	$(CC) $(CFLAGS) -o $@ words2pt.c
+	$(HOSTCC) $(HOSTCFLAGS) -o $@ words2pt.c
 
 dlink: dlink.c dobj.c dobj.h
-	$(CC) $(CFLAGS) -o $@ dlink.c dobj.c
+	$(HOSTCC) $(HOSTCFLAGS) -o $@ dlink.c dobj.c
 
 darc: darc.c dobj.c dobj.h
-	$(CC) $(CFLAGS) -o $@ darc.c dobj.c
+	$(HOSTCC) $(HOSTCFLAGS) -o $@ darc.c dobj.c
 
 p10run: p10run.c
-	$(CC) $(CFLAGS) -o $@ p10run.c
+	$(HOSTCC) $(HOSTCFLAGS) -o $@ p10run.c
 
 pdp10-objdump: pdp10-objdump.c dobj.c dobj.h
-	$(CC) $(CFLAGS) -o $@ pdp10-objdump.c dobj.c
+	$(HOSTCC) $(HOSTCFLAGS) -o $@ pdp10-objdump.c dobj.c
 
 mkinitfs0: mkinitfs0.c
-	$(CC) $(CFLAGS) -o $@ mkinitfs0.c
+	$(HOSTCC) $(HOSTCFLAGS) -o $@ mkinitfs0.c
 
 mkbootbanner: mkbootbanner.c
-	$(CC) $(CFLAGS) -o $@ mkbootbanner.c
+	$(HOSTCC) $(HOSTCFLAGS) -o $@ mkbootbanner.c
 
 pdp10-dec-none-darc: darc
 	$(LN_S) darc $@
@@ -81,9 +81,9 @@ mkinitfs: mkinitfs0
 	$(LN_S) mkinitfs0 $@
 
 test: dlink darc p10run pdp10-objdump mktap mkinitfs mkdsk mkd6fs d6fsck packfs d6bad logstore d6swap mkbootbanner
-	$(CC) $(CFLAGS) -std=c89 -I. -o tests/dobj-test tests/dobj-test.c dobj.c
+	$(HOSTCC) $(HOSTCFLAGS) -std=c89 -I. -o tests/dobj-test tests/dobj-test.c dobj.c
 	./tests/dobj-test
-	$(CC) $(CFLAGS) -I. -o tests/pdp10-objdump-mk tests/pdp10-objdump-test.c dobj.c
+	$(HOSTCC) $(HOSTCFLAGS) -I. -o tests/pdp10-objdump-mk tests/pdp10-objdump-test.c dobj.c
 	./tests/pdp10-objdump-test.sh
 	./tests/p10run-c89-test.sh
 	./tests/p10run-functional-test.sh
@@ -131,3 +131,5 @@ help:
 	@echo "Variables:"
 	@echo "  PREFIX=/usr/local   default installation prefix"
 	@echo "  PDP10_PREFIX=...    PDP-10 toolchain prefix; overrides PREFIX"
+	@echo "  HOSTCC=cc           host C compiler for compatibility tools"
+	@echo "  HOSTCFLAGS=...      host compiler flags"
