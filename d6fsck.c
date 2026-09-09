@@ -268,8 +268,10 @@ static void scan_member(struct member *m)
         long bytes;
         unsigned s;
 
-        if (fseek(m->fp, 0L, SEEK_END) != 0 || (bytes = ftell(m->fp)) < 0 ||
-            bytes % (long)(BLOCK_WORDS * 8U) != 0)
+        if (fseek(m->fp, 0L, SEEK_END) != 0)
+                die("invalid disk member length");
+        bytes = ftell(m->fp);
+        if (bytes < 0 || bytes % (long)(BLOCK_WORDS * 8U) != 0)
                 die("invalid disk member length");
         m->sectors = (unsigned)(bytes / (long)(BLOCK_WORDS * 8U));
         rewind(m->fp);
