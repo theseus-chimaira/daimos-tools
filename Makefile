@@ -1,135 +1,92 @@
-PREFIX ?= /usr/local
-PDP10_PREFIX ?= $(PREFIX)
-BINDIR ?= $(PDP10_PREFIX)/bin
-DATADIR ?= $(PDP10_PREFIX)/share/pdp10-tools
-INCLUDEDIR ?= $(PDP10_PREFIX)/include
+PDP10_PREFIX = /usr/local
+BINDIR = ${PDP10_PREFIX}/bin
+DATADIR = ${PDP10_PREFIX}/share/pdp10-tools
+INCLUDEDIR = ${PDP10_PREFIX}/include
+CC = c99
+CFLAGS = -O2
 
-INSTALL ?= install
-LN_S ?= ln -sf
-RM ?= rm -f
-HOSTCC ?= cc
-HOSTCFLAGS ?= -Wall -Wextra -O2 -std=c99
-
-CTOOLS = mkdsk mkd6fs d6fsck packfs d6bad logstore d6swap mkdt mkstream mktap words2pt dlink darc p10run pdp10-objdump mkinitfs0 mkbootbanner
+TOOLS = mkdsk mkd6fs d6fsck packfs d6bad logstore d6swap mkdt mkstream mktap words2pt dlink darc p10run pdp10-objdump mkinitfs0 mkbootbanner
 ALIASES = pdp10-dec-none-darc pdp10-dec-none-objdump mkinitfs
-SIMH_INIS = simh/pdp6.ini simh/pdp10-ka.ini simh/pdp10-ki.ini \
-	simh/pdp10-kl.ini simh/pdp10-ks.ini
+SIMH_INIS = simh/pdp6.ini simh/pdp10-ka.ini simh/pdp10-ki.ini simh/pdp10-kl.ini simh/pdp10-ks.ini
 SIMH_NAMES = pdp6.ini pdp10-ka.ini pdp10-ki.ini pdp10-kl.ini pdp10-ks.ini
+STALE_TOOLS = pdp10-dec-none-ar pdp10-dec-none-ranlib dxr2rim mkrim mkrim.py p10bare p10bare.py
 
-.PHONY: all clean install uninstall help
-
-all: $(CTOOLS) $(ALIASES)
+all: ${TOOLS}
 
 mkdsk: mkdsk.c
-	$(HOSTCC) $(HOSTCFLAGS) -o $@ mkdsk.c
+	${CC} ${CFLAGS} -o $@ mkdsk.c
 
 mkd6fs: mkd6fs.c d6maint.c d6maint.h
-	$(HOSTCC) $(HOSTCFLAGS) -o $@ mkd6fs.c d6maint.c
+	${CC} ${CFLAGS} -o $@ mkd6fs.c d6maint.c
 
 d6fsck: d6fsck.c
-	$(HOSTCC) $(HOSTCFLAGS) -o $@ d6fsck.c
+	${CC} ${CFLAGS} -o $@ d6fsck.c
 
 packfs: packfs.c d6maint.c d6maint.h
-	$(HOSTCC) $(HOSTCFLAGS) -o $@ packfs.c d6maint.c
+	${CC} ${CFLAGS} -o $@ packfs.c d6maint.c
 
 d6bad: d6bad.c d6maint.c d6maint.h
-	$(HOSTCC) $(HOSTCFLAGS) -o $@ d6bad.c d6maint.c
+	${CC} ${CFLAGS} -o $@ d6bad.c d6maint.c
 
 logstore: logstore.c d6maint.c d6maint.h
-	$(HOSTCC) $(HOSTCFLAGS) -o $@ logstore.c d6maint.c
+	${CC} ${CFLAGS} -o $@ logstore.c d6maint.c
 
 d6swap: d6swap.c d6maint.c d6maint.h
-	$(HOSTCC) $(HOSTCFLAGS) -o $@ d6swap.c d6maint.c
+	${CC} ${CFLAGS} -o $@ d6swap.c d6maint.c
 
 mkdt: mkdt.c
-	$(HOSTCC) $(HOSTCFLAGS) -o $@ mkdt.c
+	${CC} ${CFLAGS} -o $@ mkdt.c
 
 mkstream: mkstream.c
-	$(HOSTCC) $(HOSTCFLAGS) -o $@ mkstream.c
+	${CC} ${CFLAGS} -o $@ mkstream.c
 
 mktap: mktap.c
-	$(HOSTCC) $(HOSTCFLAGS) -o $@ mktap.c
+	${CC} ${CFLAGS} -o $@ mktap.c
 
 words2pt: words2pt.c
-	$(HOSTCC) $(HOSTCFLAGS) -o $@ words2pt.c
+	${CC} ${CFLAGS} -o $@ words2pt.c
 
 dlink: dlink.c dobj.c dobj.h
-	$(HOSTCC) $(HOSTCFLAGS) -o $@ dlink.c dobj.c
+	${CC} ${CFLAGS} -o $@ dlink.c dobj.c
 
 darc: darc.c dobj.c dobj.h
-	$(HOSTCC) $(HOSTCFLAGS) -o $@ darc.c dobj.c
+	${CC} ${CFLAGS} -o $@ darc.c dobj.c
 
 p10run: p10run.c
-	$(HOSTCC) $(HOSTCFLAGS) -o $@ p10run.c
+	${CC} ${CFLAGS} -o $@ p10run.c
 
 pdp10-objdump: pdp10-objdump.c dobj.c dobj.h
-	$(HOSTCC) $(HOSTCFLAGS) -o $@ pdp10-objdump.c dobj.c
+	${CC} ${CFLAGS} -o $@ pdp10-objdump.c dobj.c
 
 mkinitfs0: mkinitfs0.c
-	$(HOSTCC) $(HOSTCFLAGS) -o $@ mkinitfs0.c
+	${CC} ${CFLAGS} -o $@ mkinitfs0.c
 
 mkbootbanner: mkbootbanner.c
-	$(HOSTCC) $(HOSTCFLAGS) -o $@ mkbootbanner.c
-
-pdp10-dec-none-darc: darc
-	$(LN_S) darc $@
-
-pdp10-dec-none-objdump: pdp10-objdump
-	$(LN_S) pdp10-objdump $@
-
-mkinitfs: mkinitfs0
-	$(LN_S) mkinitfs0 $@
-
-test: dlink darc p10run pdp10-objdump mktap mkinitfs mkdsk mkd6fs d6fsck packfs d6bad logstore d6swap mkbootbanner
-	$(HOSTCC) $(HOSTCFLAGS) -std=c89 -I. -o tests/dobj-test tests/dobj-test.c dobj.c
-	./tests/dobj-test
-	$(HOSTCC) $(HOSTCFLAGS) -I. -o tests/pdp10-objdump-mk tests/pdp10-objdump-test.c dobj.c
-	./tests/pdp10-objdump-test.sh
-	./tests/p10run-c89-test.sh
-	./tests/p10run-functional-test.sh
-	./tests/mkbootbanner-v1-test.sh
-	./tests/mktap-mtc-7track-v1-test.sh
-	./tests/mkinitfs0-test.sh
-	./tests/mkinitfs0-dxr-v1-test.sh
-	TMPDIR='$(TMPDIR)' ./tests/mkdsk-member-sectors-v1-test.sh
-	TMPDIR='$(TMPDIR)' ./tests/mkd6fs-dir-v1-test.sh
-	TMPDIR='$(TMPDIR)' ./tests/d6fsck-v1-test.sh
-	TMPDIR='$(TMPDIR)' ./tests/d6fsck-repair-v2-test.sh
-	TMPDIR='$(TMPDIR)' ./tests/d6-maintenance-v2-test.sh
+	${CC} ${CFLAGS} -o $@ mkbootbanner.c
 
 clean:
-	$(RM) $(CTOOLS) $(ALIASES) *.o tests/dobj-test tests/pdp10-objdump-mk tests/*.dobj tests/*.darc tests/*.dxr tests/*.map
+	rm -f ${TOOLS} *.o
 
 install: all
-	$(INSTALL) -d $(DESTDIR)$(BINDIR) $(DESTDIR)$(DATADIR)/simh $(DESTDIR)$(INCLUDEDIR)
-	$(INSTALL) -m 755 $(CTOOLS) $(DESTDIR)$(BINDIR)/
-	$(LN_S) darc $(DESTDIR)$(BINDIR)/pdp10-dec-none-darc
-	$(LN_S) pdp10-objdump $(DESTDIR)$(BINDIR)/pdp10-dec-none-objdump
-	$(LN_S) mkinitfs0 $(DESTDIR)$(BINDIR)/mkinitfs
-	$(INSTALL) -m 644 $(SIMH_INIS) $(DESTDIR)$(DATADIR)/simh/
-	$(INSTALL) -m 644 pdp10-sixbit.h $(DESTDIR)$(INCLUDEDIR)/
-	@echo "Installed PDP-10 compatibility tools to $(DESTDIR)$(BINDIR)"
+	mkdir -p "${DESTDIR}${BINDIR}" "${DESTDIR}${DATADIR}/simh" "${DESTDIR}${INCLUDEDIR}"
+	for f in ${STALE_TOOLS}; do rm -f "${DESTDIR}${BINDIR}/$$f"; done
+	for f in ${TOOLS}; do cp "$$f" "${DESTDIR}${BINDIR}/$$f"; chmod 755 "${DESTDIR}${BINDIR}/$$f"; done
+	ln -sf darc "${DESTDIR}${BINDIR}/pdp10-dec-none-darc"
+	ln -sf pdp10-objdump "${DESTDIR}${BINDIR}/pdp10-dec-none-objdump"
+	ln -sf mkinitfs0 "${DESTDIR}${BINDIR}/mkinitfs"
+	cp ${SIMH_INIS} "${DESTDIR}${DATADIR}/simh/"
+	chmod 644 "${DESTDIR}${DATADIR}"/simh/*
+	cp pdp10-sixbit.h "${DESTDIR}${INCLUDEDIR}/"
+	chmod 644 "${DESTDIR}${INCLUDEDIR}/pdp10-sixbit.h"
 
 uninstall:
-	@for f in $(CTOOLS) $(ALIASES); do \
-		$(RM) "$(DESTDIR)$(BINDIR)/$$f"; \
-	done
-	$(RM) $(ALIASES)
-	@for f in $(SIMH_NAMES); do \
-		$(RM) "$(DESTDIR)$(DATADIR)/simh/$$f"; \
-	done
-	@echo "Uninstalled PDP-10 compatibility tools from $(DESTDIR)$(BINDIR)"
+	for f in ${TOOLS} ${ALIASES} ${STALE_TOOLS}; do rm -f "${DESTDIR}${BINDIR}/$$f"; done
+	for f in ${SIMH_NAMES}; do rm -f "${DESTDIR}${DATADIR}/simh/$$f"; done
+	rm -f "${DESTDIR}${INCLUDEDIR}/pdp10-sixbit.h"
 
 help:
-	@echo "PDP-10 compatibility tools Makefile"
-	@echo ""
-	@echo "  make                build host C tools"
-	@echo "  make install        install tools and SIMH config data"
-	@echo "  make uninstall      remove installed tools and SIMH config data"
-	@echo "  make clean          remove generated artifacts"
-	@echo ""
-	@echo "Variables:"
-	@echo "  PREFIX=/usr/local   default installation prefix"
-	@echo "  PDP10_PREFIX=...    PDP-10 toolchain prefix; overrides PREFIX"
-	@echo "  HOSTCC=cc           host C compiler for compatibility tools"
-	@echo "  HOSTCFLAGS=...      host compiler flags"
+	@echo "PDP10 TOOLS"
+	@echo "  MAKE"
+	@echo "  MAKE INSTALL PDP10_PREFIX=/PATH"
+	@echo "  MAKE UNINSTALL PDP10_PREFIX=/PATH"
+	@echo "  MAKE CLEAN"

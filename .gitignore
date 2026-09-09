@@ -1,5 +1,11 @@
 *.o
 mkdsk
+mkd6fs
+d6fsck
+packfs
+d6bad
+logstore
+d6swap
 mkdt
 mkstream
 mktap
@@ -7,13 +13,6 @@ words2pt
 dlink
 darc
 p10run
-pdp10-dec-none-darc
-tests/dobj-test
-tests/*.dobj
-tests/*.darc
-tests/*.dxr
-tests/*.map
 pdp10-objdump
 mkinitfs0
-mkinitfs
-tests/pdp10-objdump-mk
+mkbootbanner
