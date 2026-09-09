@@ -45,6 +45,7 @@ struct linker {
     struct global_def *defs;
     int def_count;
     int def_cap;
+    int daimos_uuo_relax;
 };
 
 
@@ -234,6 +235,119 @@ static int try_extract(struct linker *l, const char *name)
     return 0;
 }
 
+
+struct daimos_uuo_veneer {
+    const char *name;
+    unsigned long opcode;
+    unsigned long index;
+};
+
+/*
+ * Only veneers whose complete implementation is exactly one monitor UUO
+ * followed by POPJ are listed here.  Helpers which alter arguments before
+ * trapping (for example mkdir, dtfs_check and write_nonets) are intentionally
+ * absent: relaxing those would change the C ABI semantics.
+ */
+static const struct daimos_uuo_veneer daimos_uuo_veneers[] = {
+    { "dsys_exit",        0040UL, 1UL },
+    { "dsys_open",        0041UL, 1UL },
+    { "dsys_close",       0042UL, 1UL },
+    { "dsys_write_chars", 0043UL, 1UL },
+    { "dsys_chdir",       0045UL, 1UL },
+    { "dsys_getcwd",      0046UL, 1UL },
+    { "dsys_stat",        0047UL, 1UL },
+    { "dsys_dirread",     0050UL, 1UL },
+    { "dsys_unlink",      0052UL, 1UL },
+    { "dsys_rename",      0053UL, 1UL },
+    { "dsys_truncate",    0054UL, 1UL },
+    { "dsys_read_words",  0055UL, 1UL },
+    { "dsys_write_words", 0056UL, 1UL },
+    { "dsys_procinfo",    0057UL, 1UL },
+    { "dsys_meminfo",     0060UL, 1UL },
+    { "dsys_readchar",    0061UL, 1UL },
+    { "dsys_writechar",   0062UL, 1UL },
+    { "dsys_halt",        0063UL, 0UL },
+    { "dsys_chmod",       0064UL, 1UL },
+    { "dsys_dtfs_format", 0065UL, 1UL },
+    { "dsys_dtfs_mount",  0066UL, 1UL },
+    { "dsys_unmount",     0067UL, 1UL },
+    { "dsys_flock",       0070UL, 1UL },
+    { "dsys_dup",         0071UL, 1UL },
+    { "dsys_symlink",     0072UL, 1UL },
+    { "dsys_nice",        0073UL, 1UL }
+};
+
+static const struct daimos_uuo_veneer *daimos_uuo_veneer(const char *name)
+{
+    size_t i;
+    for (i = 0U; i < sizeof(daimos_uuo_veneers) / sizeof(daimos_uuo_veneers[0]); i++)
+        if (strcmp(name, daimos_uuo_veneers[i].name) == 0)
+            return &daimos_uuo_veneers[i];
+    return NULL;
+}
+
+static int direct_pushj17_reloc(const struct dobj_object *o,
+                                const struct dobj_reloc *r,
+                                const char *name)
+{
+    const struct dobj_symbol *u;
+    unsigned long lh;
+    long add;
+
+    if (r->loc_sec != DOBJ_SEC_TEXT || r->type != DOBJ_RELOC_SYMBOL_RH18 ||
+        r->offset >= o->text_words || r->symbol == 0UL ||
+        r->symbol > o->symbol_count)
+        return 0;
+    u = &o->symbols[r->symbol - 1UL];
+    if (u->kind != DOBJ_SYM_UNDEF || strcmp(u->name, name) != 0)
+        return 0;
+    if (dobj_word_addend18(r->addend, &add) != 0 || add != 0L)
+        return 0;
+    lh = o->text[r->offset].lh & HALF_MASK;
+    if (((lh >> 9) & 0777UL) != 0260UL ||
+        ((lh >> 5) & 017UL) != 017UL ||
+        ((lh >> 4) & 1UL) != 0UL || (lh & 017UL) != 0UL ||
+        o->text[r->offset].rh != 0UL)
+        return 0;
+    return 1;
+}
+
+/*
+ * A missing veneer definition is safe only when every reference to that
+ * symbol is an exact direct PUSHJ 17 call which this linker can replace.
+ * Any address-taking, indexing, indirection or nonzero addend forces normal
+ * symbol resolution and therefore preserves a callable veneer.
+ */
+static int symbol_fully_daimos_uuo_relaxable(struct linker *l,
+                                              const char *name)
+{
+    int oi;
+    int seen;
+
+    if (!l->daimos_uuo_relax || daimos_uuo_veneer(name) == NULL)
+        return 0;
+    seen = 0;
+    for (oi = 0; oi < l->object_count; oi++) {
+        struct dobj_object *o;
+        unsigned long ri;
+        o = &l->objects[oi].obj;
+        for (ri = 0UL; ri < o->reloc_count; ri++) {
+            struct dobj_reloc *r;
+            struct dobj_symbol *u;
+            r = &o->relocs[ri];
+            if (r->symbol == 0UL || r->symbol > o->symbol_count)
+                continue;
+            u = &o->symbols[r->symbol - 1UL];
+            if (u->kind != DOBJ_SYM_UNDEF || strcmp(u->name, name) != 0)
+                continue;
+            seen = 1;
+            if (!direct_pushj17_reloc(o, r, name))
+                return 0;
+        }
+    }
+    return seen;
+}
+
 static int resolve_archives(struct linker *l)
 {
     int changed;
@@ -251,6 +365,9 @@ static int resolve_archives(struct linker *l)
                 if (o->symbols[si].kind != DOBJ_SYM_UNDEF)
                     continue;
                 if (find_def(l, o->symbols[si].name) >= 0)
+                    continue;
+                if (symbol_fully_daimos_uuo_relaxable(l,
+                                                       o->symbols[si].name))
                     continue;
                 r = try_extract(l, o->symbols[si].name);
                 if (r < 0)
@@ -278,7 +395,9 @@ static int check_undefined(struct linker *l)
         o = &l->objects[oi].obj;
         for (si = 0UL; si < o->symbol_count; si++) {
             if (o->symbols[si].kind == DOBJ_SYM_UNDEF &&
-                find_def(l, o->symbols[si].name) < 0) {
+                find_def(l, o->symbols[si].name) < 0 &&
+                !symbol_fully_daimos_uuo_relaxable(l,
+                                                    o->symbols[si].name)) {
                 fprintf(stderr, "dlink: undefined symbol: %s\n",
                         o->symbols[si].name);
                 return -1;
@@ -427,7 +546,15 @@ static int apply_relocs(struct linker *l, struct dobj_word *image,
                 struct dobj_symbol *u;
                 if (r->symbol == 0UL || r->symbol > lo->obj.symbol_count)
                     return -1;
+                const struct daimos_uuo_veneer *dv;
                 u = &lo->obj.symbols[r->symbol - 1UL];
+                dv = l->daimos_uuo_relax ? daimos_uuo_veneer(u->name) : NULL;
+                if (dv != NULL && direct_pushj17_reloc(&lo->obj, r, u->name)) {
+                    image[loc].lh = ((dv->opcode & 0777UL) << 9) |
+                                    (dv->index & 017UL);
+                    image[loc].rh = 0UL;
+                    continue;
+                }
                 di = find_def(l, u->name);
                 if (di < 0 || symbol_address(l, di, &target, &relative) != 0)
                     return -1;
@@ -749,7 +876,7 @@ static void cleanup(struct linker *l)
 
 static void usage(void)
 {
-    fprintf(stderr, "usage: dlink -o out.dxr [--pure|--impure] [-M out.map] [-b octal] [-A map] [-R out.dobj -N symbol [-X export] ...] input.dobj|library.darc ...\n");
+    fprintf(stderr, "usage: dlink -o out.dxr [--pure|--impure] [--daimos-uuo-relax] [-M out.map] [-b octal] [-A map] [-R out.dobj -N symbol [-X export] ...] input.dobj|library.darc ...\n");
 }
 
 int main(int argc, char **argv)
@@ -776,6 +903,7 @@ int main(int argc, char **argv)
     mres_symbol = NULL;
     mres_export_count = 0;
     l.image_base = 0UL;
+    l.daimos_uuo_relax = 0;
     purity_request = PURITY_UNKNOWN;
     first = 1;
     while (first < argc && argv[first][0] == '-') {
@@ -789,6 +917,9 @@ int main(int argc, char **argv)
         } else if (strcmp(argv[first], "--impure") == 0) {
             if (purity_request == PURITY_PURE) { usage(); return 1; }
             purity_request = PURITY_IMPURE;
+            first++;
+        } else if (strcmp(argv[first], "--daimos-uuo-relax") == 0) {
+            l.daimos_uuo_relax = 1;
             first++;
         } else if (strcmp(argv[first], "-M") == 0 && first + 1 < argc) {
             map = argv[first + 1];

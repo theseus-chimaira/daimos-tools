@@ -92,3 +92,15 @@ unindexed, non-indirect store into final TEXT, in which case it records
 IMPURE automatically.  UNKNOWN is not a proof of purity and must be treated
 like IMPURE by swapping code.  A proven text write contradicts `--pure` and
 causes the link to fail.
+
+## DAIMOS direct-UUO link relaxation
+
+`dlink --daimos-uuo-relax` may replace an exact direct
+`PUSHJ 17,dsys_*` relocation with the corresponding native DAIMOS monitor
+UUO.  The mode recognizes only libc veneers whose complete ABI action is one
+UUO followed by `POPJ 17,`; helpers which adjust arguments are not eligible.
+
+If every reference to an eligible veneer is a direct relaxable call, the
+symbol may remain undefined and no veneer object is required.  Any address
+reference, indirect/indexed call, or nonzero relocation addend forces normal
+symbol resolution so function pointers retain a callable definition.
