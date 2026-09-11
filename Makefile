@@ -2,7 +2,7 @@ PDP10_PREFIX = /usr/local
 BINDIR = ${PDP10_PREFIX}/bin
 DATADIR = ${PDP10_PREFIX}/share/pdp10-tools
 INCLUDEDIR = ${PDP10_PREFIX}/include
-CC = c99
+CC = cc
 CFLAGS = -O2
 
 TOOLS = mkdsk mkd6fs d6fsck packfs d6bad logstore d6swap mkdt mkstream mktap words2pt dlink darc p10run pdp10-objdump mkinitfs0 mkbootbanner
