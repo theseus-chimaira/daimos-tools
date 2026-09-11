@@ -17,9 +17,10 @@
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <signal.h>
+#include <time.h>
 #include <unistd.h>
 
-#define P10RUN_VERSION "p10run-dobj-v1_20260814"
+#define P10RUN_VERSION "p10run-dobj-v1_20260911"
 #define PATHSZ 4096
 #define MAX_NAME 80
 #define MASK18 0777777UL
@@ -433,7 +434,8 @@ static int run_wait(char *const argv[], const char *cwd, const char *log,
     pid_t pid;
     int status;
     int fd;
-    int elapsed;
+    long elapsed_ms;
+    struct timespec poll_delay;
     pid = fork();
     if (pid < 0)
         return -1;
@@ -452,7 +454,9 @@ static int run_wait(char *const argv[], const char *cwd, const char *log,
         execv(argv[0], argv);
         _exit(127);
     }
-    elapsed = 0;
+    elapsed_ms = 0;
+    poll_delay.tv_sec = 0;
+    poll_delay.tv_nsec = 10000000L;
     for (;;) {
         pid_t r;
         r = waitpid(pid, &status, WNOHANG);
@@ -460,13 +464,16 @@ static int run_wait(char *const argv[], const char *cwd, const char *log,
             break;
         if (r < 0)
             return -1;
-        if (timeout > 0 && elapsed >= timeout) {
+        if (timeout > 0 && elapsed_ms >= (long)timeout * 1000L) {
             kill(pid, SIGKILL);
             waitpid(pid, &status, 0);
             return 124;
         }
-        sleep(1);
-        elapsed++;
+        while (nanosleep(&poll_delay, &poll_delay) != 0 && errno == EINTR)
+            ;
+        poll_delay.tv_sec = 0;
+        poll_delay.tv_nsec = 10000000L;
+        elapsed_ms += 10L;
     }
     if (WIFEXITED(status))
         return WEXITSTATUS(status);
