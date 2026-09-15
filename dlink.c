@@ -274,7 +274,11 @@ static const struct daimos_uuo_veneer daimos_uuo_veneers[] = {
     { "dsys_flock",       0070UL, 1UL },
     { "dsys_dup",         0071UL, 1UL },
     { "dsys_symlink",     0072UL, 1UL },
-    { "dsys_nice",        0073UL, 1UL }
+    { "dsys_nice",        0073UL, 1UL },
+    { "dsys_run",         0074UL, 1UL },
+    { "dsys_wait",        0075UL, 1UL },
+    { "dsys_getpid",      0076UL, 0UL },
+    { "dsys_procctl",     0077UL, 1UL }
 };
 
 static const struct daimos_uuo_veneer *daimos_uuo_veneer(const char *name)
