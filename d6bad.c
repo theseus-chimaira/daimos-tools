@@ -26,7 +26,7 @@ static int parse_run(const char *s, struct bad_run *r)
         copy = malloc(strlen(s) + 1U);
         if (copy == NULL)
                 return -1;
-        strcpy(copy, s);
+        memcpy(copy, s, strlen(s) + 1U);
         p = strchr(copy, ':');
         if (p == NULL) {
                 free(copy);

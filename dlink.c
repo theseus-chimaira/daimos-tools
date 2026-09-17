@@ -183,7 +183,8 @@ static int rebuild_defs(struct linker *l)
                 }
                 l->defs = (struct global_def *)p;
             }
-            strcpy(l->defs[l->def_count].name, s->name);
+            memcpy(l->defs[l->def_count].name, s->name,
+                   strlen(s->name) + 1U);
             l->defs[l->def_count].object_index = oi;
             l->defs[l->def_count].symbol_index = si;
             l->def_count++;
@@ -784,7 +785,8 @@ static int write_mres_object(const char *name, const char *package_symbol,
         out.data[3UL + ew + i] = image[i];
     for (i = 0UL; i < rw; i++)
         out.data[3UL + ew + iw + i] = mresmap[i];
-    strcpy(out.symbols[0].name, package_symbol);
+    memcpy(out.symbols[0].name, package_symbol,
+           strlen(package_symbol) + 1U);
     out.symbols[0].kind = DOBJ_SYM_DEF;
     out.symbols[0].sec = DOBJ_SEC_DATA;
     out.symbols[0].value = dobj_word_halves(0UL, 0UL);
@@ -844,7 +846,8 @@ static int add_abs_map(struct linker *l, const char *name)
         }
         memset(&obj.symbols[obj.symbol_count], 0,
                sizeof(obj.symbols[obj.symbol_count]));
-        strcpy(obj.symbols[obj.symbol_count].name, sym);
+        memcpy(obj.symbols[obj.symbol_count].name, sym,
+               strlen(sym) + 1U);
         obj.symbols[obj.symbol_count].kind = DOBJ_SYM_DEF;
         obj.symbols[obj.symbol_count].sec = DOBJ_SEC_ABS;
         obj.symbols[obj.symbol_count].value.rh = value;

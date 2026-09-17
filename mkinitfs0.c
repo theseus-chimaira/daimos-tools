@@ -118,7 +118,7 @@ static int do_normalize_path(const char *text,
 
 	if (strlen(text) >= sizeof(buf))
 		die("path too long: %.64s", text);
-	strcpy(buf, text);
+	memcpy(buf, text, strlen(text) + 1U);
 	p = buf;
 	while (*p == '/') p++;
 	if (!*p)
@@ -173,9 +173,11 @@ static void fmt_path(const char parts[][MAX_PART_LEN + 1], int nparts,
 	int i;
 	buf[0] = '\0';
 	for (i = 0; i < nparts; i++) {
-		if (strlen(buf) + strlen(parts[i]) + 2 >= bufsz) break;
-		strcat(buf, "/");
-		strcat(buf, parts[i]);
+		size_t used = strlen(buf);
+		size_t partlen = strlen(parts[i]);
+		if (used + partlen + 2 >= bufsz) break;
+		buf[used++] = '/';
+		memcpy(buf + used, parts[i], partlen + 1U);
 	}
 }
 
@@ -193,7 +195,7 @@ static void parse_entry_spec(const char *spec, struct entry *e)
 
 	if (strlen(spec) >= sizeof(buf))
 		die("entry spec too long");
-	strcpy(buf, spec);
+	memcpy(buf, spec, strlen(spec) + 1U);
 
 	f[n++] = buf;
 	for (p = buf; *p; p++) {
@@ -229,7 +231,7 @@ static void parse_entry_spec(const char *spec, struct entry *e)
 	} else {
 		if (strlen(f[1]) >= sizeof(e->path))
 			die("host path too long: %s", f[1]);
-		strcpy(e->path, f[1]);
+		memcpy(e->path, f[1], strlen(f[1]) + 1U);
 	}
 }
 

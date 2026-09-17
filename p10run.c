@@ -98,7 +98,7 @@ static char *xstrdup(const char *s)
     p = (char *)malloc(strlen(s) + 1U);
     if (p == NULL)
         die("out of memory");
-    strcpy(p, s);
+    memcpy(p, s, strlen(s) + 1U);
     return p;
 }
 
@@ -494,7 +494,9 @@ static void object_path(char *out, const char *work, int n, const char *src)
     stem_name(stem, src);
     {
         char leaf[MAX_NAME + 32];
-        sprintf(leaf, "p10run-%03d-%s.dobj", n, stem);
+        if (snprintf(leaf, sizeof(leaf), "p10run-%03d-%s.dobj",
+                     n, stem) >= (int)sizeof(leaf))
+            die("temporary object name too long");
         make_path2(out, PATHSZ, work, leaf);
     }
 }
@@ -521,7 +523,9 @@ static void compile_source(const struct options *o, const char *gcc,
         char *asv[6];
 
         stem_name(stem, src);
-        sprintf(leaf, "p10run-%03d-%s.s", n, stem);
+        if (snprintf(leaf, sizeof(leaf), "p10run-%03d-%s.s",
+                     n, stem) >= (int)sizeof(leaf))
+            die("temporary assembly name too long");
         make_path2(asm_path, sizeof(asm_path), work, leaf);
         copy_text(march, sizeof(march), "-march=");
         cat_text(march, sizeof(march), machine_march(o->machine));
@@ -644,7 +648,7 @@ static void read_map(const char *path, unsigned long base, struct label_list *l)
             l->v = (struct label *)xrealloc(
                 l->v, (size_t)l->cap * sizeof(l->v[0]));
         }
-        strcpy(l->v[l->n].name, name);
+        memcpy(l->v[l->n].name, name, strlen(name) + 1U);
         l->v[l->n].value = base + v;
         l->n++;
     }
@@ -687,7 +691,8 @@ static void convert_dxr(const char *conv, const char *dxr, const char *out,
     char mode[20];
     char *av[8];
     int ac;
-    sprintf(bopt, "%lo", base);
+    if (snprintf(bopt, sizeof(bopt), "%lo", base) >= (int)sizeof(bopt))
+        die("DXR base address too long");
     copy_text(mode, sizeof(mode), "--");
     cat_text(mode, sizeof(mode), kind);
     ac = 0;

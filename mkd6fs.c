@@ -264,7 +264,7 @@ static unsigned add_node(unsigned parent, const char *name, unsigned type,
                 die("name exceeds 24 SIXBIT characters");
         n = &nodes[node_count];
         memset(n, 0, sizeof(*n));
-        strcpy(n->name, name);
+        memcpy(n->name, name, strlen(name) + 1U);
         n->parent = parent;
         n->type = type;
         n->mode = mode;
@@ -458,7 +458,7 @@ static void parse_file_spec(const char *spec)
         copy = malloc(strlen(spec) + 1U);
         if (copy == NULL)
                 die("out of memory");
-        strcpy(copy, spec);
+        memcpy(copy, spec, strlen(spec) + 1U);
         path = copy;
         p = strchr(path, ':');
         if (p == NULL) die("file spec requires PATH:HOST:MODE:ENCODING");
@@ -501,7 +501,7 @@ static void parse_dir_spec(const char *spec)
         copy = malloc(strlen(spec) + 1U);
         if (copy == NULL)
                 die("out of memory");
-        strcpy(copy, spec);
+        memcpy(copy, spec, strlen(spec) + 1U);
         path = copy;
         p = strrchr(path, ':');
         if (p == NULL)
@@ -531,7 +531,7 @@ static void parse_symlink_spec(const char *spec)
         copy = malloc(strlen(spec) + 1U);
         if (copy == NULL)
                 die("out of memory");
-        strcpy(copy, spec);
+        memcpy(copy, spec, strlen(spec) + 1U);
         path = copy;
         p = strchr(path, ':');
         if (p == NULL)
