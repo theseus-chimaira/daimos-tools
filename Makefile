@@ -1,4 +1,4 @@
-PDP10_PREFIX = /usr/local
+PDP10_PREFIX ?= /usr/local
 BINDIR = ${PDP10_PREFIX}/bin
 DATADIR = ${PDP10_PREFIX}/share/pdp10-tools
 INCLUDEDIR = ${PDP10_PREFIX}/include
