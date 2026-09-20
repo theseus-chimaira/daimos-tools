@@ -5,7 +5,7 @@ INCLUDEDIR = ${PDP10_PREFIX}/include
 CC = cc
 CFLAGS = -O2
 
-TOOLS = mkdsk mkd6fs d6fsck packfs d6bad logstore d6swap mkdt mkstream mktap words2pt dlink darc p10run pdp10-objdump mkinitfs0 mkbootbanner
+TOOLS = mkdsk mkd6fs d6fsck packfs d6bad logstore d6swap mkdt mktsfs tsfscheck mkstream mktap words2pt dlink darc p10run pdp10-objdump mkinitfs0 mkbootbanner
 ALIASES = pdp10-dec-none-darc pdp10-dec-none-objdump mkinitfs
 SIMH_INIS = simh/pdp6.ini simh/pdp10-ka.ini simh/pdp10-ki.ini simh/pdp10-kl.ini simh/pdp10-ks.ini
 SIMH_NAMES = pdp6.ini pdp10-ka.ini pdp10-ki.ini pdp10-kl.ini pdp10-ks.ini
@@ -36,6 +36,12 @@ d6swap: d6swap.c d6maint.c d6maint.h
 
 mkdt: mkdt.c
 	${CC} ${CFLAGS} -o $@ mkdt.c
+
+mktsfs: mktsfs.c tsfs-format.c tsfs-format.h
+	${CC} ${CFLAGS} -std=c99 -o $@ mktsfs.c tsfs-format.c
+
+tsfscheck: tsfscheck.c tsfs-format.c tsfs-format.h
+	${CC} ${CFLAGS} -std=c99 -o $@ tsfscheck.c tsfs-format.c
 
 mkstream: mkstream.c
 	${CC} ${CFLAGS} -o $@ mkstream.c
@@ -76,13 +82,13 @@ install: all
 	ln -sf mkinitfs0 "${DESTDIR}${BINDIR}/mkinitfs"
 	cp ${SIMH_INIS} "${DESTDIR}${DATADIR}/simh/"
 	chmod 644 "${DESTDIR}${DATADIR}"/simh/*
-	cp pdp10-sixbit.h "${DESTDIR}${INCLUDEDIR}/"
-	chmod 644 "${DESTDIR}${INCLUDEDIR}/pdp10-sixbit.h"
+	cp pdp10-sixbit.h tsfs-format.h "${DESTDIR}${INCLUDEDIR}/"
+	chmod 644 "${DESTDIR}${INCLUDEDIR}/pdp10-sixbit.h" "${DESTDIR}${INCLUDEDIR}/tsfs-format.h"
 
 uninstall:
 	for f in ${TOOLS} ${ALIASES} ${STALE_TOOLS}; do rm -f "${DESTDIR}${BINDIR}/$$f"; done
 	for f in ${SIMH_NAMES}; do rm -f "${DESTDIR}${DATADIR}/simh/$$f"; done
-	rm -f "${DESTDIR}${INCLUDEDIR}/pdp10-sixbit.h"
+	rm -f "${DESTDIR}${INCLUDEDIR}/pdp10-sixbit.h" "${DESTDIR}${INCLUDEDIR}/tsfs-format.h"
 
 help:
 	@echo "PDP10 TOOLS"
