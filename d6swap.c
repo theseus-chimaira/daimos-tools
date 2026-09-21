@@ -271,6 +271,69 @@ static void resize(const char *argv0, const char *dir, unsigned n,
             old_tail, new_tail, old_total, new_total);
 }
 
+
+static void migrate_reservation(const char *argv0, const char *dir, unsigned n)
+{
+        struct d6m_set set;
+        struct d6m_super super;
+        uint64_t selected_block[D6M_BLOCK_WORDS];
+        uint64_t block[D6M_BLOCK_WORDS];
+        uint64_t raw[D6M_SUPER_WORDS];
+        unsigned selected;
+        unsigned tail_blocks;
+        unsigned i;
+        char err[256];
+
+        if (d6m_run_fsck(argv0, dir, n, 0) != 0)
+                die("pre-migration d6fsck failed");
+        if (d6m_open(&set, dir, n, 1, err, sizeof(err)) != 0)
+                die(err);
+        if (d6m_select_super(&set, &super, &selected, selected_block,
+            err, sizeof(err)) != 0)
+                die(err);
+        tail_blocks = set.layout.swap_tail_blocks * set.members;
+        if (tail_blocks == 0U) {
+                d6m_close(&set);
+                die("media has no legacy swap tail to migrate");
+        }
+        if (super.swap_blocks != 0U) {
+                if (super.swap_start != super.total ||
+                    super.swap_blocks != tail_blocks) {
+                        d6m_close(&set);
+                        die("existing D6FS swap reservation disagrees with DBOOT tail");
+                }
+                d6m_close(&set);
+                fprintf(stderr, "d6swap: swap reservation already authoritative\n");
+                return;
+        }
+        if (super.swap_start != 0U) {
+                d6m_close(&set);
+                die("zero-length swap reservation has nonzero start");
+        }
+        super.swap_start = super.total;
+        super.swap_blocks = tail_blocks;
+        super.sequence = (super.sequence + 1U) & D6M_WORD_MASK;
+        super.state = D6M_STATE_CLEAN;
+        if (d6m_super_encode(raw, &super) != 0) {
+                d6m_close(&set);
+                die("cannot encode migrated superblock");
+        }
+        memcpy(block, selected_block, sizeof(block));
+        for (i = 0; i < D6M_SUPER_WORDS; ++i)
+                block[i] = raw[i];
+        if (d6m_write(&set, set.layout.super_a, block) != 0 ||
+            d6m_write(&set, set.layout.super_b, block) != 0) {
+                d6m_close(&set);
+                die("cannot publish migrated swap reservation");
+        }
+        d6m_close(&set);
+        if (d6m_run_fsck(argv0, dir, n, 0) != 0)
+                die("post-migration d6fsck failed");
+        fprintf(stderr,
+            "d6swap: migrated legacy tail to D6FS swap reservation start=%o blocks=%o\n",
+            super.swap_start, super.swap_blocks);
+}
+
 static void usage(void)
 {
         fprintf(stderr,
@@ -279,7 +342,8 @@ static void usage(void)
             "       d6swap -n members -d diskdir --resize --ram-words words "
             "--output newdiskdir\n"
             "       d6swap -n members -d diskdir --resize-tail blocks "
-            "--output newdiskdir\n");
+            "--output newdiskdir\n"
+            "       d6swap -n members -d diskdir --migrate-reservation\n");
         exit(2);
 }
 
@@ -288,7 +352,7 @@ int main(int argc, char **argv)
         const char *dir = NULL, *output = NULL;
         unsigned n = 0, tail = 0;
         uint64_t ram_words = 0;
-        int show_mode = 0, plan = 0, do_resize = 0, a;
+        int show_mode = 0, plan = 0, do_resize = 0, migrate = 0, a;
         char err[256];
         struct d6m_set set;
 
@@ -303,6 +367,8 @@ int main(int argc, char **argv)
                         plan = 1;
                 else if (strcmp(argv[a], "--resize") == 0)
                         do_resize = 1;
+                else if (strcmp(argv[a], "--migrate-reservation") == 0)
+                        migrate = 1;
                 else if (strcmp(argv[a], "--ram-words") == 0 && a + 1 < argc)
                         ram_words = strtoull(argv[++a], NULL, 0);
                 else if (strcmp(argv[a], "--resize-tail") == 0 && a + 1 < argc) {
@@ -314,11 +380,13 @@ int main(int argc, char **argv)
                         usage();
         }
         if (dir == NULL || n == 0 || n > D6M_MAX_MEMBERS ||
-            show_mode + plan + do_resize != 1)
+            show_mode + plan + do_resize + migrate != 1)
                 usage();
         if ((plan || (do_resize && tail == 0)) && ram_words == 0)
                 usage();
         if ((do_resize && output == NULL) || (!do_resize && output != NULL))
+                usage();
+        if (migrate && (ram_words != 0 || tail != 0U))
                 usage();
         if (ram_words != 0) {
                 tail = tail_for_ram(ram_words, n);
@@ -336,6 +404,10 @@ int main(int argc, char **argv)
                         die(err);
                 show(&set);
                 d6m_close(&set);
+                return 0;
+        }
+        if (migrate) {
+                migrate_reservation(argv[0], dir, n);
                 return 0;
         }
         if (d6m_clone_diskset(dir, output, n, err, sizeof(err)) != 0)
