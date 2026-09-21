@@ -32,6 +32,11 @@
 #define D6FS_LAYOUT_BADMAP_START 016U
 #define D6FS_LAYOUT_BADMAP_BLOCKS 017U
 #define D6FS_BADMAP_MAGIC       0442642414422ULL
+#define D6FS_RES_START_SHIFT    12U
+#define D6FS_RES_LEN_LOW_MASK   07777ULL
+#define D6FS_RES_LEN_HIGH_MASK  07777ULL
+#define D6FS_RES_LOG_HIGH_SHIFT 12U
+#define D6FS_RES_RESERVED_MASK  07777ULL
 #define D6FS_TYPE_FREE          0U
 #define D6FS_TYPE_REG           1U
 #define D6FS_TYPE_DIR           2U
@@ -89,6 +94,8 @@ struct super_info {
         uint64_t sequence;
         unsigned state;
         uint64_t fsid[2];
+        unsigned logstore_start;
+        unsigned logstore_blocks;
         unsigned total;
         unsigned root;
         unsigned fcb_start;
@@ -377,13 +384,17 @@ static int super_decode(const uint64_t sb[SUPER_WORDS], unsigned disk_blocks,
 {
         if ((sb[0] & ~077ULL) != (D6FS_MAGIC & ~077ULL) ||
             (sb[0] & 077ULL) != D6FS_VERSION || sb[2] > 1 ||
-            sb[5] != 0 || sb[6] != 0 ||
+            sb[5] != 0 || (sb[017] >> 24U) != 0 ||
+            (sb[017] & D6FS_RES_RESERVED_MASK) != 0 ||
             sb[7] == 0 || sb[7] > disk_blocks || sb[012] == 0 ||
             sb[010] >= sb[012])
                 return -1;
         s->sequence = sb[1];
         s->state = (unsigned)sb[2];
         s->fsid[0] = sb[3]; s->fsid[1] = sb[4];
+        s->logstore_start = (unsigned)(sb[6] >> D6FS_RES_START_SHIFT);
+        s->logstore_blocks = (unsigned)((((sb[017] >> D6FS_RES_LOG_HIGH_SHIFT) &
+            D6FS_RES_LEN_HIGH_MASK) << 12U) | (sb[6] & D6FS_RES_LEN_LOW_MASK));
         s->total = (unsigned)sb[7];
         s->root = (unsigned)sb[010];
         s->fcb_start = (unsigned)sb[011];
@@ -395,9 +406,9 @@ static int super_decode(const uint64_t sb[SUPER_WORDS], unsigned disk_blocks,
         if (!range_ok(s->fcb_start,
             (s->fcb_count * FCB_WORDS + BLOCK_WORDS - 1) / BLOCK_WORDS,
             s->total) || !range_ok(s->freemap_start, s->freemap_blocks, s->total) ||
-            !range_ok(s->summary_start, s->summary_blocks, s->total))
-                return -1;
-        if (sb[017] != 0)
+            !range_ok(s->summary_start, s->summary_blocks, s->total) ||
+            (s->logstore_blocks == 0U ? s->logstore_start != 0U :
+            !range_ok(s->logstore_start, s->logstore_blocks, s->total)))
                 return -1;
         return 0;
 }
@@ -405,6 +416,8 @@ static int super_decode(const uint64_t sb[SUPER_WORDS], unsigned disk_blocks,
 static int same_identity(const struct super_info *a, const struct super_info *b)
 {
         return a->fsid[0] == b->fsid[0] && a->fsid[1] == b->fsid[1] &&
+            a->logstore_start == b->logstore_start &&
+            a->logstore_blocks == b->logstore_blocks &&
             a->total == b->total && a->root == b->root &&
             a->fcb_start == b->fcb_start && a->fcb_count == b->fcb_count &&
             a->freemap_start == b->freemap_start &&

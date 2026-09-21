@@ -428,7 +428,9 @@ int d6m_super_decode(const uint64_t sb[D6M_SUPER_WORDS], unsigned disk_blocks,
         s->sequence = sb[1];
         s->state = (unsigned)sb[2];
         s->fsid[0] = sb[3]; s->fsid[1] = sb[4];
-        s->dsid[0] = sb[5]; s->dsid[1] = sb[6];
+        s->logstore_start = (unsigned)(sb[6] >> D6M_RES_START_SHIFT);
+        s->logstore_blocks = (unsigned)((((sb[017] >> D6M_RES_LOG_HIGH_SHIFT) &
+            D6M_RES_LEN_HIGH_MASK) << 12U) | (sb[6] & D6M_RES_LEN_LOW_MASK));
         s->total = (unsigned)sb[7];
         s->root = (unsigned)sb[010];
         s->fcb_start = (unsigned)sb[011];
@@ -442,7 +444,10 @@ int d6m_super_decode(const uint64_t sb[D6M_SUPER_WORDS], unsigned disk_blocks,
             D6M_BLOCK_WORDS, s->total) ||
             !range_ok(s->freemap_start, s->freemap_blocks, s->total) ||
             !range_ok(s->summary_start, s->summary_blocks, s->total) ||
-            sb[017] != 0)
+            sb[5] != 0 || (sb[017] >> 24U) != 0 ||
+            (sb[017] & D6M_RES_RESERVED_MASK) != 0 ||
+            (s->logstore_blocks == 0U ? s->logstore_start != 0U :
+            !range_ok(s->logstore_start, s->logstore_blocks, s->total)))
                 return -1;
         return 0;
 }
@@ -456,7 +461,9 @@ int d6m_super_encode(uint64_t raw[D6M_SUPER_WORDS], const struct d6m_super *s)
         raw[1] = s->sequence & D6M_WORD_MASK;
         raw[2] = s->state;
         raw[3] = s->fsid[0]; raw[4] = s->fsid[1];
-        raw[5] = s->dsid[0]; raw[6] = s->dsid[1];
+        raw[5] = 0;
+        raw[6] = ((uint64_t)s->logstore_start << D6M_RES_START_SHIFT) |
+            ((uint64_t)s->logstore_blocks & D6M_RES_LEN_LOW_MASK);
         raw[7] = s->total;
         raw[010] = s->root;
         raw[011] = s->fcb_start;
@@ -465,13 +472,16 @@ int d6m_super_encode(uint64_t raw[D6M_SUPER_WORDS], const struct d6m_super *s)
         raw[014] = s->freemap_blocks;
         raw[015] = s->summary_start;
         raw[016] = s->summary_blocks;
+        raw[017] = ((uint64_t)(s->logstore_blocks >> 12U) &
+            D6M_RES_LEN_HIGH_MASK) << D6M_RES_LOG_HIGH_SHIFT;
         return 0;
 }
 
 static int same_identity(const struct d6m_super *a, const struct d6m_super *b)
 {
         return a->fsid[0] == b->fsid[0] && a->fsid[1] == b->fsid[1] &&
-            a->dsid[0] == b->dsid[0] && a->dsid[1] == b->dsid[1] &&
+            a->logstore_start == b->logstore_start &&
+            a->logstore_blocks == b->logstore_blocks &&
             a->total == b->total && a->root == b->root &&
             a->fcb_start == b->fcb_start && a->fcb_count == b->fcb_count &&
             a->freemap_start == b->freemap_start &&
