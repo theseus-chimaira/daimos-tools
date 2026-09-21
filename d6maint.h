@@ -35,6 +35,7 @@
 #define D6M_RES_START_SHIFT         12U
 #define D6M_RES_LEN_LOW_MASK        07777ULL
 #define D6M_RES_LEN_HIGH_MASK       07777ULL
+#define D6M_RES_SWAP_HIGH_SHIFT     24U
 #define D6M_RES_LOG_HIGH_SHIFT      12U
 #define D6M_RES_RESERVED_MASK       07777ULL
 #define D6M_TYPE_FREE               0U
@@ -67,6 +68,8 @@ struct d6m_super {
         uint64_t sequence;
         unsigned state;
         uint64_t fsid[2];
+        unsigned swap_start;
+        unsigned swap_blocks;
         unsigned logstore_start;
         unsigned logstore_blocks;
         unsigned total;

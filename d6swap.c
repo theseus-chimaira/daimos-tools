@@ -240,6 +240,8 @@ static void resize(const char *argv0, const char *dir, unsigned n,
                         d6m_set_bit(fm + (size_t)mbi * D6M_BLOCK_WORDS, bit, 0);
                 }
         super.total = new_total;
+        super.swap_start = new_tail == 0U ? 0U : new_total;
+        super.swap_blocks = new_tail * n;
         super.sequence = (super.sequence + 1U) & D6M_WORD_MASK;
         super.state = D6M_STATE_CLEAN;
         d6m_rebuild_summary(&super, fm, sum);

@@ -428,6 +428,9 @@ int d6m_super_decode(const uint64_t sb[D6M_SUPER_WORDS], unsigned disk_blocks,
         s->sequence = sb[1];
         s->state = (unsigned)sb[2];
         s->fsid[0] = sb[3]; s->fsid[1] = sb[4];
+        s->swap_start = (unsigned)(sb[5] >> D6M_RES_START_SHIFT);
+        s->swap_blocks = (unsigned)((((sb[017] >> D6M_RES_SWAP_HIGH_SHIFT) &
+            D6M_RES_LEN_HIGH_MASK) << 12U) | (sb[5] & D6M_RES_LEN_LOW_MASK));
         s->logstore_start = (unsigned)(sb[6] >> D6M_RES_START_SHIFT);
         s->logstore_blocks = (unsigned)((((sb[017] >> D6M_RES_LOG_HIGH_SHIFT) &
             D6M_RES_LEN_HIGH_MASK) << 12U) | (sb[6] & D6M_RES_LEN_LOW_MASK));
@@ -444,8 +447,9 @@ int d6m_super_decode(const uint64_t sb[D6M_SUPER_WORDS], unsigned disk_blocks,
             D6M_BLOCK_WORDS, s->total) ||
             !range_ok(s->freemap_start, s->freemap_blocks, s->total) ||
             !range_ok(s->summary_start, s->summary_blocks, s->total) ||
-            sb[5] != 0 || (sb[017] >> 24U) != 0 ||
             (sb[017] & D6M_RES_RESERVED_MASK) != 0 ||
+            (s->swap_blocks == 0U ? s->swap_start != 0U :
+            s->swap_start != disk_blocks) ||
             (s->logstore_blocks == 0U ? s->logstore_start != 0U :
             !range_ok(s->logstore_start, s->logstore_blocks, s->total)))
                 return -1;
@@ -461,7 +465,8 @@ int d6m_super_encode(uint64_t raw[D6M_SUPER_WORDS], const struct d6m_super *s)
         raw[1] = s->sequence & D6M_WORD_MASK;
         raw[2] = s->state;
         raw[3] = s->fsid[0]; raw[4] = s->fsid[1];
-        raw[5] = 0;
+        raw[5] = ((uint64_t)s->swap_start << D6M_RES_START_SHIFT) |
+            ((uint64_t)s->swap_blocks & D6M_RES_LEN_LOW_MASK);
         raw[6] = ((uint64_t)s->logstore_start << D6M_RES_START_SHIFT) |
             ((uint64_t)s->logstore_blocks & D6M_RES_LEN_LOW_MASK);
         raw[7] = s->total;
@@ -472,14 +477,18 @@ int d6m_super_encode(uint64_t raw[D6M_SUPER_WORDS], const struct d6m_super *s)
         raw[014] = s->freemap_blocks;
         raw[015] = s->summary_start;
         raw[016] = s->summary_blocks;
-        raw[017] = ((uint64_t)(s->logstore_blocks >> 12U) &
-            D6M_RES_LEN_HIGH_MASK) << D6M_RES_LOG_HIGH_SHIFT;
+        raw[017] = (((uint64_t)(s->swap_blocks >> 12U) &
+            D6M_RES_LEN_HIGH_MASK) << D6M_RES_SWAP_HIGH_SHIFT) |
+            (((uint64_t)(s->logstore_blocks >> 12U) &
+            D6M_RES_LEN_HIGH_MASK) << D6M_RES_LOG_HIGH_SHIFT);
         return 0;
 }
 
 static int same_identity(const struct d6m_super *a, const struct d6m_super *b)
 {
         return a->fsid[0] == b->fsid[0] && a->fsid[1] == b->fsid[1] &&
+            a->swap_start == b->swap_start &&
+            a->swap_blocks == b->swap_blocks &&
             a->logstore_start == b->logstore_start &&
             a->logstore_blocks == b->logstore_blocks &&
             a->total == b->total && a->root == b->root &&
@@ -506,6 +515,10 @@ int d6m_select_super(const struct d6m_set *set, struct d6m_super *s,
         }
         av = d6m_super_decode(a, d6m_total_blocks(set), &ai) == 0;
         bv = d6m_super_decode(b, d6m_total_blocks(set), &bi) == 0;
+        if (av && ai.swap_blocks > set->layout.swap_tail_blocks * set->members)
+                av = 0;
+        if (bv && bi.swap_blocks > set->layout.swap_tail_blocks * set->members)
+                bv = 0;
         if (!av && !bv) {
                 seterr(err, errlen, "no structurally valid superblock");
                 return -1;

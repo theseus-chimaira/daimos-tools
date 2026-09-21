@@ -35,6 +35,7 @@
 #define D6FS_RES_START_SHIFT    12U
 #define D6FS_RES_LEN_LOW_MASK   07777ULL
 #define D6FS_RES_LEN_HIGH_MASK  07777ULL
+#define D6FS_RES_SWAP_HIGH_SHIFT 24U
 #define D6FS_RES_LOG_HIGH_SHIFT 12U
 #define D6FS_RES_RESERVED_MASK  07777ULL
 #define D6FS_TYPE_FREE          0U
@@ -94,6 +95,8 @@ struct super_info {
         uint64_t sequence;
         unsigned state;
         uint64_t fsid[2];
+        unsigned swap_start;
+        unsigned swap_blocks;
         unsigned logstore_start;
         unsigned logstore_blocks;
         unsigned total;
@@ -384,7 +387,6 @@ static int super_decode(const uint64_t sb[SUPER_WORDS], unsigned disk_blocks,
 {
         if ((sb[0] & ~077ULL) != (D6FS_MAGIC & ~077ULL) ||
             (sb[0] & 077ULL) != D6FS_VERSION || sb[2] > 1 ||
-            sb[5] != 0 || (sb[017] >> 24U) != 0 ||
             (sb[017] & D6FS_RES_RESERVED_MASK) != 0 ||
             sb[7] == 0 || sb[7] > disk_blocks || sb[012] == 0 ||
             sb[010] >= sb[012])
@@ -392,6 +394,9 @@ static int super_decode(const uint64_t sb[SUPER_WORDS], unsigned disk_blocks,
         s->sequence = sb[1];
         s->state = (unsigned)sb[2];
         s->fsid[0] = sb[3]; s->fsid[1] = sb[4];
+        s->swap_start = (unsigned)(sb[5] >> D6FS_RES_START_SHIFT);
+        s->swap_blocks = (unsigned)((((sb[017] >> D6FS_RES_SWAP_HIGH_SHIFT) &
+            D6FS_RES_LEN_HIGH_MASK) << 12U) | (sb[5] & D6FS_RES_LEN_LOW_MASK));
         s->logstore_start = (unsigned)(sb[6] >> D6FS_RES_START_SHIFT);
         s->logstore_blocks = (unsigned)((((sb[017] >> D6FS_RES_LOG_HIGH_SHIFT) &
             D6FS_RES_LEN_HIGH_MASK) << 12U) | (sb[6] & D6FS_RES_LEN_LOW_MASK));
@@ -407,6 +412,9 @@ static int super_decode(const uint64_t sb[SUPER_WORDS], unsigned disk_blocks,
             (s->fcb_count * FCB_WORDS + BLOCK_WORDS - 1) / BLOCK_WORDS,
             s->total) || !range_ok(s->freemap_start, s->freemap_blocks, s->total) ||
             !range_ok(s->summary_start, s->summary_blocks, s->total) ||
+            (s->swap_blocks == 0U ? s->swap_start != 0U :
+            (s->swap_start != disk_blocks ||
+            s->swap_blocks > disk_layout.swap_tail_blocks * member_count)) ||
             (s->logstore_blocks == 0U ? s->logstore_start != 0U :
             !range_ok(s->logstore_start, s->logstore_blocks, s->total)))
                 return -1;
@@ -416,6 +424,8 @@ static int super_decode(const uint64_t sb[SUPER_WORDS], unsigned disk_blocks,
 static int same_identity(const struct super_info *a, const struct super_info *b)
 {
         return a->fsid[0] == b->fsid[0] && a->fsid[1] == b->fsid[1] &&
+            a->swap_start == b->swap_start &&
+            a->swap_blocks == b->swap_blocks &&
             a->logstore_start == b->logstore_start &&
             a->logstore_blocks == b->logstore_blocks &&
             a->total == b->total && a->root == b->root &&
