@@ -419,20 +419,26 @@ static int range_ok(unsigned start, unsigned count, unsigned total)
 int d6m_super_decode(const uint64_t sb[D6M_SUPER_WORDS], unsigned disk_blocks,
     struct d6m_super *s)
 {
+        uint64_t high;
+        unsigned fcb_blocks;
+
         if (sb == NULL || s == NULL ||
             (sb[0] & ~077ULL) != (D6M_MAGIC & ~077ULL) ||
             (sb[0] & 077ULL) != D6M_VERSION || sb[2] > D6M_STATE_DIRTY ||
-            sb[7] == 0 || sb[7] > disk_blocks || sb[012] == 0 ||
-            sb[010] >= sb[012])
+            sb[7] == 0 || sb[7] > disk_blocks || sb[7] > D6M_LOGICAL_BLOCK_LIMIT ||
+            sb[012] == 0 || sb[010] >= sb[012])
+                return -1;
+        high = sb[017];
+        if ((high & D6M_RES_RESERVED_MASK) != 0)
                 return -1;
         s->sequence = sb[1];
         s->state = (unsigned)sb[2];
         s->fsid[0] = sb[3]; s->fsid[1] = sb[4];
         s->swap_start = (unsigned)(sb[5] >> D6M_RES_START_SHIFT);
-        s->swap_blocks = (unsigned)((((sb[017] >> D6M_RES_SWAP_HIGH_SHIFT) &
+        s->swap_blocks = (unsigned)((((high >> D6M_RES_SWAP_HI_SHIFT) &
             D6M_RES_LEN_HIGH_MASK) << 12U) | (sb[5] & D6M_RES_LEN_LOW_MASK));
-        s->logstore_start = (unsigned)(sb[6] >> D6M_RES_START_SHIFT);
-        s->logstore_blocks = (unsigned)((((sb[017] >> D6M_RES_LOG_HIGH_SHIFT) &
+        s->log_start = (unsigned)(sb[6] >> D6M_RES_START_SHIFT);
+        s->log_blocks = (unsigned)((((high >> D6M_RES_LOG_HI_SHIFT) &
             D6M_RES_LEN_HIGH_MASK) << 12U) | (sb[6] & D6M_RES_LEN_LOW_MASK));
         s->total = (unsigned)sb[7];
         s->root = (unsigned)sb[010];
@@ -442,23 +448,37 @@ int d6m_super_decode(const uint64_t sb[D6M_SUPER_WORDS], unsigned disk_blocks,
         s->freemap_blocks = (unsigned)sb[014];
         s->summary_start = (unsigned)sb[015];
         s->summary_blocks = (unsigned)sb[016];
-        if (!range_ok(s->fcb_start,
-            (s->fcb_count * D6M_FCB_WORDS + D6M_BLOCK_WORDS - 1U) /
-            D6M_BLOCK_WORDS, s->total) ||
+        fcb_blocks = (s->fcb_count * D6M_FCB_WORDS + D6M_BLOCK_WORDS - 1U) /
+            D6M_BLOCK_WORDS;
+        if (!range_ok(s->fcb_start, fcb_blocks, s->total) ||
             !range_ok(s->freemap_start, s->freemap_blocks, s->total) ||
+            s->summary_blocks != 1U ||
             !range_ok(s->summary_start, s->summary_blocks, s->total) ||
-            (sb[017] & D6M_RES_RESERVED_MASK) != 0 ||
             (s->swap_blocks == 0U ? s->swap_start != 0U :
-            s->swap_start != disk_blocks) ||
-            (s->logstore_blocks == 0U ? s->logstore_start != 0U :
-            !range_ok(s->logstore_start, s->logstore_blocks, s->total)))
+            (s->swap_start != s->total ||
+            s->swap_blocks > D6M_LOGICAL_BLOCK_LIMIT - s->swap_start)) ||
+            (s->log_blocks == 0U ? s->log_start != 0U :
+            !range_ok(s->log_start, s->log_blocks, s->total)))
+                return -1;
+        if (s->log_blocks != 0U &&
+            ((s->log_start < s->fcb_start + fcb_blocks &&
+            s->fcb_start < s->log_start + s->log_blocks) ||
+            (s->log_start < s->freemap_start + s->freemap_blocks &&
+            s->freemap_start < s->log_start + s->log_blocks) ||
+            (s->log_start < s->summary_start + s->summary_blocks &&
+            s->summary_start < s->log_start + s->log_blocks)))
                 return -1;
         return 0;
 }
 
 int d6m_super_encode(uint64_t raw[D6M_SUPER_WORDS], const struct d6m_super *s)
 {
-        if (raw == NULL || s == NULL)
+        uint64_t high;
+
+        if (raw == NULL || s == NULL || s->swap_start >= D6M_LOGICAL_BLOCK_LIMIT ||
+            s->log_start >= D6M_LOGICAL_BLOCK_LIMIT ||
+            s->swap_blocks >= D6M_LOGICAL_BLOCK_LIMIT ||
+            s->log_blocks >= D6M_LOGICAL_BLOCK_LIMIT)
                 return -1;
         memset(raw, 0, D6M_SUPER_WORDS * sizeof(*raw));
         raw[0] = (D6M_MAGIC & ~077ULL) | D6M_VERSION;
@@ -466,9 +486,13 @@ int d6m_super_encode(uint64_t raw[D6M_SUPER_WORDS], const struct d6m_super *s)
         raw[2] = s->state;
         raw[3] = s->fsid[0]; raw[4] = s->fsid[1];
         raw[5] = ((uint64_t)s->swap_start << D6M_RES_START_SHIFT) |
-            ((uint64_t)s->swap_blocks & D6M_RES_LEN_LOW_MASK);
-        raw[6] = ((uint64_t)s->logstore_start << D6M_RES_START_SHIFT) |
-            ((uint64_t)s->logstore_blocks & D6M_RES_LEN_LOW_MASK);
+            (s->swap_blocks & D6M_RES_LEN_LOW_MASK);
+        raw[6] = ((uint64_t)s->log_start << D6M_RES_START_SHIFT) |
+            (s->log_blocks & D6M_RES_LEN_LOW_MASK);
+        high = (((uint64_t)(s->swap_blocks >> 12U) & D6M_RES_LEN_HIGH_MASK) <<
+            D6M_RES_SWAP_HI_SHIFT) |
+            (((uint64_t)(s->log_blocks >> 12U) & D6M_RES_LEN_HIGH_MASK) <<
+            D6M_RES_LOG_HI_SHIFT);
         raw[7] = s->total;
         raw[010] = s->root;
         raw[011] = s->fcb_start;
@@ -477,26 +501,21 @@ int d6m_super_encode(uint64_t raw[D6M_SUPER_WORDS], const struct d6m_super *s)
         raw[014] = s->freemap_blocks;
         raw[015] = s->summary_start;
         raw[016] = s->summary_blocks;
-        raw[017] = (((uint64_t)(s->swap_blocks >> 12U) &
-            D6M_RES_LEN_HIGH_MASK) << D6M_RES_SWAP_HIGH_SHIFT) |
-            (((uint64_t)(s->logstore_blocks >> 12U) &
-            D6M_RES_LEN_HIGH_MASK) << D6M_RES_LOG_HIGH_SHIFT);
+        raw[017] = high;
         return 0;
+}
+
+static int sequence_newer(uint64_t a, uint64_t b)
+{
+        uint64_t delta;
+
+        delta = (a - b) & D6M_WORD_MASK;
+        return delta != 0 && delta < (1ULL << 35);
 }
 
 static int same_identity(const struct d6m_super *a, const struct d6m_super *b)
 {
-        return a->fsid[0] == b->fsid[0] && a->fsid[1] == b->fsid[1] &&
-            a->swap_start == b->swap_start &&
-            a->swap_blocks == b->swap_blocks &&
-            a->logstore_start == b->logstore_start &&
-            a->logstore_blocks == b->logstore_blocks &&
-            a->total == b->total && a->root == b->root &&
-            a->fcb_start == b->fcb_start && a->fcb_count == b->fcb_count &&
-            a->freemap_start == b->freemap_start &&
-            a->freemap_blocks == b->freemap_blocks &&
-            a->summary_start == b->summary_start &&
-            a->summary_blocks == b->summary_blocks;
+        return a->fsid[0] == b->fsid[0] && a->fsid[1] == b->fsid[1];
 }
 
 int d6m_select_super(const struct d6m_set *set, struct d6m_super *s,
@@ -515,10 +534,6 @@ int d6m_select_super(const struct d6m_set *set, struct d6m_super *s,
         }
         av = d6m_super_decode(a, d6m_total_blocks(set), &ai) == 0;
         bv = d6m_super_decode(b, d6m_total_blocks(set), &bi) == 0;
-        if (av && ai.swap_blocks > set->layout.swap_tail_blocks * set->members)
-                av = 0;
-        if (bv && bi.swap_blocks > set->layout.swap_tail_blocks * set->members)
-                bv = 0;
         if (!av && !bv) {
                 seterr(err, errlen, "no structurally valid superblock");
                 return -1;
@@ -532,14 +547,23 @@ int d6m_select_super(const struct d6m_set *set, struct d6m_super *s,
                 seterr(err, errlen, "equal-sequence superblocks differ");
                 return -1;
         }
-        if (!bv || (av && ai.sequence >= bi.sequence)) {
+        if (!bv || (av && (ai.sequence == bi.sequence ||
+            sequence_newer(ai.sequence, bi.sequence)))) {
                 *s = ai;
                 *selected = set->layout.super_a;
                 memcpy(selected_block, a, sizeof(a));
-        } else {
+        } else if (!av || sequence_newer(bi.sequence, ai.sequence)) {
                 *s = bi;
                 *selected = set->layout.super_b;
                 memcpy(selected_block, b, sizeof(b));
+        } else {
+                seterr(err, errlen, "ambiguous superblock sequence distance");
+                return -1;
+        }
+        if (s->swap_blocks != 0U &&
+            s->swap_blocks > set->layout.swap_tail_blocks * set->members) {
+                seterr(err, errlen, "swap reservation exceeds raw tail capacity");
+                return -1;
         }
         return 0;
 }

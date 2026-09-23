@@ -32,12 +32,6 @@
 #define D6FS_LAYOUT_BADMAP_START 016U
 #define D6FS_LAYOUT_BADMAP_BLOCKS 017U
 #define D6FS_BADMAP_MAGIC       0442642414422ULL
-#define D6FS_RES_START_SHIFT    12U
-#define D6FS_RES_LEN_LOW_MASK   07777ULL
-#define D6FS_RES_LEN_HIGH_MASK  07777ULL
-#define D6FS_RES_SWAP_HIGH_SHIFT 24U
-#define D6FS_RES_LOG_HIGH_SHIFT 12U
-#define D6FS_RES_RESERVED_MASK  07777ULL
 #define D6FS_TYPE_FREE          0U
 #define D6FS_TYPE_REG           1U
 #define D6FS_TYPE_DIR           2U
@@ -49,6 +43,13 @@
 #define DIRENT_HASH_SHIFT       12U
 #define DIRENT_TYPE_SHIFT       9U
 #define DIRENT_TYPE_MASK        07U
+#define RES_START_SHIFT         12U
+#define RES_LEN_LOW_MASK        07777ULL
+#define RES_LEN_HIGH_MASK       07777ULL
+#define RES_SWAP_HI_SHIFT       24U
+#define RES_LOG_HI_SHIFT        12U
+#define RES_RESERVED_MASK       07777ULL
+#define LOGICAL_BLOCK_LIMIT     (1U << 24)
 
 struct member {
         FILE *fp;
@@ -97,8 +98,8 @@ struct super_info {
         uint64_t fsid[2];
         unsigned swap_start;
         unsigned swap_blocks;
-        unsigned logstore_start;
-        unsigned logstore_blocks;
+        unsigned log_start;
+        unsigned log_blocks;
         unsigned total;
         unsigned root;
         unsigned fcb_start;
@@ -385,21 +386,26 @@ static int range_ok(unsigned start, unsigned count, unsigned total)
 static int super_decode(const uint64_t sb[SUPER_WORDS], unsigned disk_blocks,
     struct super_info *s)
 {
+        uint64_t high;
+        unsigned fcb_blocks;
+
         if ((sb[0] & ~077ULL) != (D6FS_MAGIC & ~077ULL) ||
             (sb[0] & 077ULL) != D6FS_VERSION || sb[2] > 1 ||
-            (sb[017] & D6FS_RES_RESERVED_MASK) != 0 ||
-            sb[7] == 0 || sb[7] > disk_blocks || sb[012] == 0 ||
-            sb[010] >= sb[012])
+            sb[7] == 0 || sb[7] > disk_blocks || sb[7] > LOGICAL_BLOCK_LIMIT ||
+            sb[012] == 0 || sb[010] >= sb[012])
+                return -1;
+        high = sb[017];
+        if ((high & RES_RESERVED_MASK) != 0)
                 return -1;
         s->sequence = sb[1];
         s->state = (unsigned)sb[2];
         s->fsid[0] = sb[3]; s->fsid[1] = sb[4];
-        s->swap_start = (unsigned)(sb[5] >> D6FS_RES_START_SHIFT);
-        s->swap_blocks = (unsigned)((((sb[017] >> D6FS_RES_SWAP_HIGH_SHIFT) &
-            D6FS_RES_LEN_HIGH_MASK) << 12U) | (sb[5] & D6FS_RES_LEN_LOW_MASK));
-        s->logstore_start = (unsigned)(sb[6] >> D6FS_RES_START_SHIFT);
-        s->logstore_blocks = (unsigned)((((sb[017] >> D6FS_RES_LOG_HIGH_SHIFT) &
-            D6FS_RES_LEN_HIGH_MASK) << 12U) | (sb[6] & D6FS_RES_LEN_LOW_MASK));
+        s->swap_start = (unsigned)(sb[5] >> RES_START_SHIFT);
+        s->swap_blocks = (unsigned)((((high >> RES_SWAP_HI_SHIFT) &
+            RES_LEN_HIGH_MASK) << 12U) | (sb[5] & RES_LEN_LOW_MASK));
+        s->log_start = (unsigned)(sb[6] >> RES_START_SHIFT);
+        s->log_blocks = (unsigned)((((high >> RES_LOG_HI_SHIFT) &
+            RES_LEN_HIGH_MASK) << 12U) | (sb[6] & RES_LEN_LOW_MASK));
         s->total = (unsigned)sb[7];
         s->root = (unsigned)sb[010];
         s->fcb_start = (unsigned)sb[011];
@@ -408,32 +414,39 @@ static int super_decode(const uint64_t sb[SUPER_WORDS], unsigned disk_blocks,
         s->freemap_blocks = (unsigned)sb[014];
         s->summary_start = (unsigned)sb[015];
         s->summary_blocks = (unsigned)sb[016];
-        if (!range_ok(s->fcb_start,
-            (s->fcb_count * FCB_WORDS + BLOCK_WORDS - 1) / BLOCK_WORDS,
-            s->total) || !range_ok(s->freemap_start, s->freemap_blocks, s->total) ||
+        fcb_blocks = (s->fcb_count * FCB_WORDS + BLOCK_WORDS - 1U) / BLOCK_WORDS;
+        if (!range_ok(s->fcb_start, fcb_blocks, s->total) ||
+            !range_ok(s->freemap_start, s->freemap_blocks, s->total) ||
+            s->summary_blocks != 1U ||
             !range_ok(s->summary_start, s->summary_blocks, s->total) ||
             (s->swap_blocks == 0U ? s->swap_start != 0U :
-            (s->swap_start != disk_blocks ||
-            s->swap_blocks > disk_layout.swap_tail_blocks * member_count)) ||
-            (s->logstore_blocks == 0U ? s->logstore_start != 0U :
-            !range_ok(s->logstore_start, s->logstore_blocks, s->total)))
+            (s->swap_start != s->total ||
+            s->swap_blocks > LOGICAL_BLOCK_LIMIT - s->swap_start)) ||
+            (s->log_blocks == 0U ? s->log_start != 0U :
+            !range_ok(s->log_start, s->log_blocks, s->total)))
+                return -1;
+        if (s->log_blocks != 0U &&
+            ((s->log_start < s->fcb_start + fcb_blocks &&
+            s->fcb_start < s->log_start + s->log_blocks) ||
+            (s->log_start < s->freemap_start + s->freemap_blocks &&
+            s->freemap_start < s->log_start + s->log_blocks) ||
+            (s->log_start < s->summary_start + s->summary_blocks &&
+            s->summary_start < s->log_start + s->log_blocks)))
                 return -1;
         return 0;
 }
 
+static int sequence_newer(uint64_t a, uint64_t b)
+{
+        uint64_t delta;
+
+        delta = (a - b) & WORD_MASK;
+        return delta != 0 && delta < (1ULL << 35);
+}
+
 static int same_identity(const struct super_info *a, const struct super_info *b)
 {
-        return a->fsid[0] == b->fsid[0] && a->fsid[1] == b->fsid[1] &&
-            a->swap_start == b->swap_start &&
-            a->swap_blocks == b->swap_blocks &&
-            a->logstore_start == b->logstore_start &&
-            a->logstore_blocks == b->logstore_blocks &&
-            a->total == b->total && a->root == b->root &&
-            a->fcb_start == b->fcb_start && a->fcb_count == b->fcb_count &&
-            a->freemap_start == b->freemap_start &&
-            a->freemap_blocks == b->freemap_blocks &&
-            a->summary_start == b->summary_start &&
-            a->summary_blocks == b->summary_blocks;
+        return a->fsid[0] == b->fsid[0] && a->fsid[1] == b->fsid[1];
 }
 
 static unsigned extent_high(uint64_t word, unsigned e)
@@ -465,7 +478,9 @@ static int fcb_decode(const uint64_t f[FCB_WORDS], unsigned total,
         if (i->parent >= fcb_count)
                 return -1;
         capacity = 0;
-        for (e = 0; e < EXTENTS; ++e) {
+        {
+                unsigned previous_end = 0U;
+                for (e = 0; e < EXTENTS; ++e) {
                 uint64_t run, count;
                 unsigned start, blocks;
 
@@ -479,9 +494,12 @@ static int fcb_decode(const uint64_t f[FCB_WORDS], unsigned total,
                 count = ((uint64_t)extent_high(f[005], e) << EXTENT_LOW_BITS) |
                     (run & EXTENT_LOW_MASK);
                 blocks = (unsigned)(count + 1);
-                if (start >= total || blocks > total - start)
+                if (start >= total || blocks > total - start ||
+                    (e != 0U && start < previous_end))
                         return -1;
+                previous_end = start + blocks;
                 capacity += (uint64_t)blocks * BLOCK_WORDS;
+                }
         }
         return i->size <= capacity ? 0 : -1;
 }
@@ -810,17 +828,32 @@ static int check_filesystem(unsigned sa, unsigned sb)
                 problem("equal-sequence superblocks differ", sa, sb);
                 ambiguous = 1;
         }
-        if (!bv || (av && ai.sequence >= bi.sequence)) {
+        if (!bv) {
                 s = &ai; selected = sa; selected_block = ba;
-        } else {
+        } else if (!av) {
                 s = &bi; selected = sb; selected_block = bb;
+        } else if (ai.sequence == bi.sequence ||
+            sequence_newer(ai.sequence, bi.sequence)) {
+                s = &ai; selected = sa; selected_block = ba;
+        } else if (sequence_newer(bi.sequence, ai.sequence)) {
+                s = &bi; selected = sb; selected_block = bb;
+        } else {
+                problem("ambiguous superblock sequence distance", sa, sb);
+                ambiguous = 1;
+                s = &ai; selected = sa; selected_block = ba;
         }
         if (s->total != total_blocks()) {
                 problem("superblock total differs from diskset", s->total, total_blocks());
                 ambiguous = 1;
         }
         if (s->state != 0)
-                fprintf(stderr, "d6fsck: note: selected superblock is DIRTY\n");
+                problem("selected superblock DIRTY", selected, ~0U);
+        if (s->swap_blocks != 0U &&
+            s->swap_blocks > disk_layout.swap_tail_blocks * member_count) {
+                problem("swap reservation exceeds raw tail capacity",
+                    s->swap_blocks, disk_layout.swap_tail_blocks * member_count);
+                ambiguous = 1;
+        }
 
         total = s->total;
         fcb_blocks = (s->fcb_count * FCB_WORDS + BLOCK_WORDS - 1) / BLOCK_WORDS;
@@ -865,6 +898,8 @@ static int check_filesystem(unsigned sa, unsigned sb)
         mark_range(used, total, s->fcb_start, fcb_blocks, 1);
         mark_range(used, total, s->freemap_start, s->freemap_blocks, 1);
         mark_range(used, total, s->summary_start, s->summary_blocks, 1);
+        if (s->log_blocks != 0U)
+                mark_range(used, total, s->log_start, s->log_blocks, 1);
         for (i = 0; i < total; ++i) {
                 unsigned mi, local;
                 if (map_logical(i, &mi, &local) != 0)
@@ -934,6 +969,11 @@ static int check_filesystem(unsigned sa, unsigned sb)
                                         break;
                                 }
                         if (j != DIRENT_WORDS)
+                                continue;
+                        for (j = 0; j < DIRENT_WORDS; ++j)
+                                if (ent[j] != 0)
+                                        break;
+                        if (j == DIRENT_WORDS)
                                 continue;
                         for (j = 0; j < 4; ++j) name[j] = ent[j];
                         hash = (ent[4] >> DIRENT_HASH_SHIFT) & HASH_MASK;

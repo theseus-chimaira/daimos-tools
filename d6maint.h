@@ -35,9 +35,10 @@
 #define D6M_RES_START_SHIFT         12U
 #define D6M_RES_LEN_LOW_MASK        07777ULL
 #define D6M_RES_LEN_HIGH_MASK       07777ULL
-#define D6M_RES_SWAP_HIGH_SHIFT     24U
-#define D6M_RES_LOG_HIGH_SHIFT      12U
+#define D6M_RES_SWAP_HI_SHIFT       24U
+#define D6M_RES_LOG_HI_SHIFT        12U
 #define D6M_RES_RESERVED_MASK       07777ULL
+#define D6M_LOGICAL_BLOCK_LIMIT     (1U << 24)
 #define D6M_TYPE_FREE               0U
 #define D6M_TYPE_REG                1U
 #define D6M_TYPE_DIR                2U
@@ -70,8 +71,8 @@ struct d6m_super {
         uint64_t fsid[2];
         unsigned swap_start;
         unsigned swap_blocks;
-        unsigned logstore_start;
-        unsigned logstore_blocks;
+        unsigned log_start;
+        unsigned log_blocks;
         unsigned total;
         unsigned root;
         unsigned fcb_start;

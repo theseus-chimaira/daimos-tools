@@ -39,17 +39,18 @@
 #define D6FS_TYPE_DIR           2U
 #define D6FS_TYPE_SYMLINK       3U
 #define D6FS_STATE_CLEAN        0U
-#define D6FS_RES_START_SHIFT    12U
-#define D6FS_RES_LEN_LOW_MASK   07777ULL
-#define D6FS_RES_LEN_HIGH_MASK  07777ULL
-#define D6FS_RES_SWAP_HIGH_SHIFT 24U
-#define D6FS_RES_LOG_HIGH_SHIFT 12U
 #define HASH_MASK               077777777ULL
 #define EXTENT_LOW_BITS         12U
 #define EXTENT_LOW_MASK         07777ULL
 #define EXTENT_HIGH_MASK        037ULL
 #define DIRENT_HASH_SHIFT       12U
 #define DIRENT_TYPE_SHIFT       9U
+#define RES_START_SHIFT         12U
+#define RES_LEN_LOW_MASK        07777ULL
+#define RES_LEN_HIGH_MASK       07777ULL
+#define RES_SWAP_HI_SHIFT       24U
+#define RES_LOG_HI_SHIFT        12U
+#define LOGICAL_BLOCK_LIMIT     (1U << 24)
 
 struct member {
         FILE *fp;
@@ -904,25 +905,32 @@ static void format_fs(unsigned super_a, unsigned super_b)
 
         fsid0 = deterministic_id(012345670123ULL, total);
         fsid1 = deterministic_id(076543210765ULL, total);
-        memset(block, 0, sizeof(block));
-        block[0] = (D6FS_MAGIC & ~077ULL) | D6FS_VERSION;
-        block[1] = 1U;
-        block[2] = D6FS_STATE_CLEAN;
-        block[3] = fsid0; block[4] = fsid1;
         {
-                unsigned swap_blocks;
+                unsigned swap_blocks = disk_layout.swap_tail_blocks * member_count;
+                uint64_t high;
 
-                swap_blocks = disk_layout.swap_tail_blocks * member_count;
-                block[5] = swap_blocks == 0U ? 0U :
-                    ((uint64_t)total << D6FS_RES_START_SHIFT) |
-                    ((uint64_t)swap_blocks & D6FS_RES_LEN_LOW_MASK);
-                block[017] = swap_blocks == 0U ? 0U :
-                    (((uint64_t)(swap_blocks >> 12U) &
-                    D6FS_RES_LEN_HIGH_MASK) << D6FS_RES_SWAP_HIGH_SHIFT);
+                if (total >= LOGICAL_BLOCK_LIMIT || swap_blocks >= LOGICAL_BLOCK_LIMIT ||
+                    disk_layout.logstore_start >= LOGICAL_BLOCK_LIMIT ||
+                    disk_layout.logstore_blocks >= LOGICAL_BLOCK_LIMIT)
+                        die("D6FS reservation is outside 24-bit logical range");
+                memset(block, 0, sizeof(block));
+                block[0] = (D6FS_MAGIC & ~077ULL) | D6FS_VERSION;
+                block[1] = 1U;
+                block[2] = D6FS_STATE_CLEAN;
+                block[3] = fsid0; block[4] = fsid1;
+                if (swap_blocks != 0U)
+                        block[5] = ((uint64_t)total << RES_START_SHIFT) |
+                            (swap_blocks & RES_LEN_LOW_MASK);
+                if (disk_layout.logstore_blocks != 0U)
+                        block[6] = ((uint64_t)disk_layout.logstore_start <<
+                            RES_START_SHIFT) |
+                            (disk_layout.logstore_blocks & RES_LEN_LOW_MASK);
+                high = (((uint64_t)(swap_blocks >> 12U) & RES_LEN_HIGH_MASK) <<
+                    RES_SWAP_HI_SHIFT) |
+                    (((uint64_t)(disk_layout.logstore_blocks >> 12U) &
+                    RES_LEN_HIGH_MASK) << RES_LOG_HI_SHIFT);
+                block[017] = high;
         }
-        block[6] = ((uint64_t)disk_layout.logstore_start <<
-            D6FS_RES_START_SHIFT) | ((uint64_t)disk_layout.logstore_blocks &
-            D6FS_RES_LEN_LOW_MASK);
         block[7] = total;
         block[010] = 0U;
         block[011] = fcb_start;
@@ -931,8 +939,6 @@ static void format_fs(unsigned super_a, unsigned super_b)
         block[014] = freemap_blocks;
         block[015] = summary_start;
         block[016] = summary_blocks;
-        block[017] |= ((uint64_t)(disk_layout.logstore_blocks >> 12U) &
-            D6FS_RES_LEN_HIGH_MASK) << D6FS_RES_LOG_HIGH_SHIFT;
         if (write_logical(super_a, block) != 0 ||
             write_logical(super_b, block) != 0)
                 die("cannot write superblocks");

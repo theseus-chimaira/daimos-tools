@@ -32,17 +32,25 @@ static unsigned tail_for_ram(uint64_t ram_words, unsigned members)
         return (unsigned)blocks;
 }
 
-static void show(const struct d6m_set *set)
+static void show(struct d6m_set *set)
 {
-        unsigned i;
+        struct d6m_super super;
+        uint64_t selected_block[D6M_BLOCK_WORDS];
+        unsigned selected, i;
         uint64_t total_words;
+        char err[256];
 
+        if (d6m_select_super(set, &super, &selected, selected_block,
+            err, sizeof(err)) != 0)
+                die(err);
         total_words = (uint64_t)set->layout.swap_tail_blocks * set->members *
             D6M_BLOCK_WORDS;
-        printf("members=%u tail-blocks/member=%o total-swap-blocks=%o total-swap-words=%llo\n",
+        printf("members=%u tail-blocks/member=%o total-swap-blocks=%o "
+            "total-swap-words=%llo reservation=%o+%o logstore=%o+%o\n",
             set->members, set->layout.swap_tail_blocks,
             set->layout.swap_tail_blocks * set->members,
-            (unsigned long long)total_words);
+            (unsigned long long)total_words, super.swap_start,
+            super.swap_blocks, super.log_start, super.log_blocks);
         for (i = 0; i < set->members; ++i)
                 printf("member=%u swap-physical=%o..%o d6fs-base=%o d6fs-blocks=%o\n",
                     i, set->member[i].sectors - set->layout.swap_tail_blocks,
@@ -70,6 +78,97 @@ static uint64_t read_word(FILE *fp)
         for (i = 0; i < 8; ++i)
                 v |= (uint64_t)raw[i] << (i * 8U);
         return v & D6M_WORD_MASK;
+}
+
+static int tail_map(const struct d6m_set *set, unsigned tail_blocks,
+    unsigned logical, unsigned *memberp, unsigned *sectorp)
+{
+        unsigned floor, next, width, zone, rel, slot, i, absolute, total;
+
+        if (set == NULL || memberp == NULL || sectorp == NULL || tail_blocks == 0U)
+                return -1;
+        total = d6m_total_blocks(set);
+        if (logical >= tail_blocks * set->members)
+                return -1;
+        absolute = total + logical;
+        floor = 0U;
+        for (;;) {
+                next = 0U;
+                width = 0U;
+                for (i = 0U; i < set->members; ++i) {
+                        unsigned blocks = set->member[i].blocks + tail_blocks;
+                        if (blocks > floor) {
+                                ++width;
+                                if (next == 0U || blocks < next)
+                                        next = blocks;
+                        }
+                }
+                if (width == 0U || next <= floor)
+                        return -1;
+                zone = (next - floor) * width;
+                if (absolute < zone)
+                        break;
+                absolute -= zone;
+                floor = next;
+        }
+        rel = absolute / width;
+        slot = absolute % width;
+        for (i = 0U; i < set->members; ++i) {
+                unsigned blocks = set->member[i].blocks + tail_blocks;
+                if (blocks <= floor)
+                        continue;
+                if (slot == 0U) {
+                        *memberp = i;
+                        *sectorp = set->member[i].base + floor + rel;
+                        return *sectorp < set->member[i].sectors ? 0 : -1;
+                }
+                --slot;
+        }
+        return -1;
+}
+
+static void save_swap_image(struct d6m_set *set, FILE *tmp, unsigned tail_blocks)
+{
+        uint64_t block[D6M_BLOCK_WORDS];
+        unsigned l, w, mi, sector, total;
+
+        total = tail_blocks * set->members;
+        for (l = 0U; l < total; ++l) {
+                if (tail_map(set, tail_blocks, l, &mi, &sector) != 0 ||
+                    d6m_read_phys(set, mi, sector, block) != 0)
+                        die("cannot snapshot logical swap tail");
+                for (w = 0U; w < D6M_BLOCK_WORDS; ++w)
+                        write_word(tmp, block[w]);
+        }
+        if (fflush(tmp) != 0)
+                die("cannot flush temporary swap image");
+}
+
+static void restore_swap_image(struct d6m_set *set, FILE *tmp,
+    unsigned old_total, unsigned old_tail, unsigned new_tail)
+{
+        uint64_t block[D6M_BLOCK_WORDS];
+        unsigned l, w, mi, sector, copy, new_total;
+        long offset;
+
+        copy = old_tail < new_tail ? old_tail : new_tail;
+        copy *= set->members;
+        new_total = new_tail * set->members;
+        offset = (long)((uint64_t)old_total * D6M_BLOCK_WORDS * 8U);
+        if (fseek(tmp, offset, SEEK_SET) != 0)
+                die("cannot seek temporary swap image");
+        for (l = 0U; l < copy; ++l) {
+                for (w = 0U; w < D6M_BLOCK_WORDS; ++w)
+                        block[w] = read_word(tmp);
+                if (tail_map(set, new_tail, l, &mi, &sector) != 0 ||
+                    d6m_write_phys(set, mi, sector, block) != 0)
+                        die("cannot restore logical swap tail");
+        }
+        memset(block, 0, sizeof(block));
+        for (l = copy; l < new_total; ++l)
+                if (tail_map(set, new_tail, l, &mi, &sector) != 0 ||
+                    d6m_write_phys(set, mi, sector, block) != 0)
+                        die("cannot initialize enlarged swap tail");
 }
 
 static void save_logical_image(struct d6m_set *set, FILE *tmp, unsigned total)
@@ -141,10 +240,10 @@ static void resize(const char *argv0, const char *dir, unsigned n,
     unsigned new_tail)
 {
         struct d6m_set oldset, newset;
-        struct d6m_super super;
-        uint64_t selected_block[D6M_BLOCK_WORDS], *fm, *sum;
-        uint64_t block[D6M_BLOCK_WORDS], raw[D6M_SUPER_WORDS];
-        unsigned selected, old_total, new_total, i, b, new_map_blocks;
+        struct d6m_super super, dirty_super;
+        uint64_t selected_block[D6M_BLOCK_WORDS], dirty_block[D6M_BLOCK_WORDS];
+        uint64_t *fm, *sum;
+        unsigned selected, dirty_selected, old_total, new_total, i, b, new_map_blocks;
         unsigned old_tail;
         unsigned new_blocks[D6M_MAX_MEMBERS];
         char err[256], tmppath[1024];
@@ -210,6 +309,9 @@ static void resize(const char *argv0, const char *dir, unsigned n,
                         if (d6m_get_bit(fm + (size_t)mbi * D6M_BLOCK_WORDS, bit))
                                 die("cannot shrink: allocated logical blocks remain in the removed tail");
                 }
+        if (d6m_begin_dirty(&oldset, &super, selected, selected_block,
+            &dirty_super, &dirty_selected, dirty_block) != 0)
+                die("cannot publish DIRTY state before swap resize");
 
         tmpdir = getenv("TMPDIR");
         if (tmpdir == NULL || *tmpdir == '\0')
@@ -221,6 +323,11 @@ static void resize(const char *argv0, const char *dir, unsigned n,
         if (tmp == NULL)
                 die(strerror(errno));
         save_logical_image(&oldset, tmp, old_total);
+        if (old_tail != 0U) {
+                if (fseek(tmp, 0L, SEEK_END) != 0)
+                        die("cannot append temporary swap image");
+                save_swap_image(&oldset, tmp, old_tail);
+        }
 
         for (i = 0; i < n; ++i)
                 update_descriptor(&oldset, i, new_blocks[i], new_tail);
@@ -228,60 +335,55 @@ static void resize(const char *argv0, const char *dir, unsigned n,
         if (d6m_open(&newset, dir, n, 1, err, sizeof(err)) != 0)
                 die(err);
         restore_logical_image(&newset, tmp, old_total, new_total);
+        if (old_tail != 0U || new_tail != 0U)
+                restore_swap_image(&newset, tmp, old_total, old_tail, new_tail);
         fclose(tmp);
         unlink(tmppath);
 
-        /* Update allocation bounds and both superblock copies only after all
-         * logical data has been restored through the new stripe mapping. */
+        /* Metadata remains covered by the durable DIRTY generation created
+         * before the member descriptors changed.  Update the new logical
+         * geometry and reservation, then publish CLEAN only after the free
+         * map and summary are durable. */
         if (new_total > old_total)
                 for (i = old_total; i < new_total; ++i) {
                         unsigned mbi = i / D6M_BITS_PER_MAP_BLOCK;
                         unsigned bit = i % D6M_BITS_PER_MAP_BLOCK;
                         d6m_set_bit(fm + (size_t)mbi * D6M_BLOCK_WORDS, bit, 0);
                 }
-        super.total = new_total;
-        super.swap_start = new_tail == 0U ? 0U : new_total;
-        super.swap_blocks = new_tail * n;
-        super.sequence = (super.sequence + 1U) & D6M_WORD_MASK;
-        super.state = D6M_STATE_CLEAN;
-        d6m_rebuild_summary(&super, fm, sum);
-        for (b = 0; b < super.freemap_blocks; ++b)
-                if (d6m_write(&newset, super.freemap_start + b,
+        dirty_super.total = new_total;
+        dirty_super.swap_start = new_tail == 0U ? 0U : new_total;
+        dirty_super.swap_blocks = new_tail * n;
+        if (dirty_super.log_blocks != 0U &&
+            dirty_super.log_start + dirty_super.log_blocks > new_total)
+                die("resize would truncate logstore reservation");
+        d6m_rebuild_summary(&dirty_super, fm, sum);
+        for (b = 0; b < dirty_super.freemap_blocks; ++b)
+                if (d6m_write(&newset, dirty_super.freemap_start + b,
                     fm + (size_t)b * D6M_BLOCK_WORDS) != 0)
                         die("cannot update free map after swap resize");
-        for (b = 0; b < super.summary_blocks; ++b)
-                if (d6m_write(&newset, super.summary_start + b,
+        for (b = 0; b < dirty_super.summary_blocks; ++b)
+                if (d6m_write(&newset, dirty_super.summary_start + b,
                     sum + (size_t)b * D6M_BLOCK_WORDS) != 0)
                         die("cannot update free summary after swap resize");
-        if (d6m_super_encode(raw, &super) != 0)
-                die("cannot encode resized superblock");
-        for (i = 0; i < D6M_BLOCK_WORDS; ++i)
-                block[i] = 0;
-        for (i = 0; i < D6M_SUPER_WORDS; ++i)
-                block[i] = raw[i];
-        if (d6m_write(&newset, newset.layout.super_a, block) != 0 ||
-            d6m_write(&newset, newset.layout.super_b, block) != 0)
-                die("cannot publish resized superblocks");
+        if (d6m_publish_clean(&newset, &dirty_super, dirty_selected,
+            dirty_block, NULL) != 0)
+                die("cannot publish CLEAN state after swap resize");
         d6m_close(&newset);
         free(sum); free(fm);
-        if (d6m_run_fsck(argv0, dir, n, 0) != 0)
+        if (d6m_run_fsck(argv0, dir, n, 1) != 0 ||
+            d6m_run_fsck(argv0, dir, n, 0) != 0)
                 die("post-resize d6fsck failed");
         fprintf(stderr,
             "d6swap: resized tail/member %o -> %o blocks; D6FS %o -> %o blocks\n",
             old_tail, new_tail, old_total, new_total);
 }
 
-
 static void migrate_reservation(const char *argv0, const char *dir, unsigned n)
 {
         struct d6m_set set;
-        struct d6m_super super;
-        uint64_t selected_block[D6M_BLOCK_WORDS];
-        uint64_t block[D6M_BLOCK_WORDS];
-        uint64_t raw[D6M_SUPER_WORDS];
-        unsigned selected;
-        unsigned tail_blocks;
-        unsigned i;
+        struct d6m_super super, dirty_super;
+        uint64_t selected_block[D6M_BLOCK_WORDS], dirty_block[D6M_BLOCK_WORDS];
+        unsigned selected, dirty_selected, blocks;
         char err[256];
 
         if (d6m_run_fsck(argv0, dir, n, 0) != 0)
@@ -291,47 +393,24 @@ static void migrate_reservation(const char *argv0, const char *dir, unsigned n)
         if (d6m_select_super(&set, &super, &selected, selected_block,
             err, sizeof(err)) != 0)
                 die(err);
-        tail_blocks = set.layout.swap_tail_blocks * set.members;
-        if (tail_blocks == 0U) {
-                d6m_close(&set);
-                die("media has no legacy swap tail to migrate");
-        }
-        if (super.swap_blocks != 0U) {
-                if (super.swap_start != super.total ||
-                    super.swap_blocks != tail_blocks) {
-                        d6m_close(&set);
-                        die("existing D6FS swap reservation disagrees with DBOOT tail");
-                }
-                d6m_close(&set);
-                fprintf(stderr, "d6swap: swap reservation already authoritative\n");
-                return;
-        }
-        if (super.swap_start != 0U) {
-                d6m_close(&set);
-                die("zero-length swap reservation has nonzero start");
-        }
+        blocks = set.layout.swap_tail_blocks * set.members;
+        if (blocks == 0U)
+                die("DBOOT has no raw swap tail to migrate");
+        if (super.swap_blocks != 0U || super.swap_start != 0U)
+                die("D6FS swap reservation already present");
         super.swap_start = super.total;
-        super.swap_blocks = tail_blocks;
-        super.sequence = (super.sequence + 1U) & D6M_WORD_MASK;
-        super.state = D6M_STATE_CLEAN;
-        if (d6m_super_encode(raw, &super) != 0) {
-                d6m_close(&set);
-                die("cannot encode migrated superblock");
-        }
-        memcpy(block, selected_block, sizeof(block));
-        for (i = 0; i < D6M_SUPER_WORDS; ++i)
-                block[i] = raw[i];
-        if (d6m_write(&set, set.layout.super_a, block) != 0 ||
-            d6m_write(&set, set.layout.super_b, block) != 0) {
-                d6m_close(&set);
-                die("cannot publish migrated swap reservation");
-        }
+        super.swap_blocks = blocks;
+        if (d6m_begin_dirty(&set, &super, selected, selected_block,
+            &dirty_super, &dirty_selected, dirty_block) != 0)
+                die("cannot publish DIRTY migration generation");
+        if (d6m_publish_clean(&set, &dirty_super, dirty_selected,
+            dirty_block, NULL) != 0)
+                die("cannot publish CLEAN migration generation");
         d6m_close(&set);
         if (d6m_run_fsck(argv0, dir, n, 0) != 0)
                 die("post-migration d6fsck failed");
-        fprintf(stderr,
-            "d6swap: migrated legacy tail to D6FS swap reservation start=%o blocks=%o\n",
-            super.swap_start, super.swap_blocks);
+        fprintf(stderr, "d6swap: migrated DBOOT tail to D6FS reservation %o+%o\n",
+            super.total, blocks);
 }
 
 static void usage(void)
@@ -386,8 +465,10 @@ int main(int argc, char **argv)
                 usage();
         if ((do_resize && output == NULL) || (!do_resize && output != NULL))
                 usage();
-        if (migrate && (ram_words != 0 || tail != 0U))
-                usage();
+        if (migrate) {
+                migrate_reservation(argv[0], dir, n);
+                return 0;
+        }
         if (ram_words != 0) {
                 tail = tail_for_ram(ram_words, n);
                 if (tail == 0)
@@ -404,10 +485,6 @@ int main(int argc, char **argv)
                         die(err);
                 show(&set);
                 d6m_close(&set);
-                return 0;
-        }
-        if (migrate) {
-                migrate_reservation(argv[0], dir, n);
                 return 0;
         }
         if (d6m_clone_diskset(dir, output, n, err, sizeof(err)) != 0)
