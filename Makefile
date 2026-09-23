@@ -5,13 +5,16 @@ INCLUDEDIR = ${PDP10_PREFIX}/include
 CC = cc
 CFLAGS = -O2
 
-TOOLS = mkdsk mkd6fs d6fsck packfs d6bad logstore d6swap mkdt mktsfs tsfscheck mkstream mktap words2pt dlink darc p10run pdp10-objdump mkinitfs0 mkbootbanner
+TOOLS = d6lz mkdsk mkd6fs d6fsck packfs d6bad logstore d6swap mkdt mktsfs tsfscheck mkstream mktap words2pt dlink darc p10run pdp10-objdump mkinitfs0 mkbootbanner
 ALIASES = pdp10-dec-none-darc pdp10-dec-none-objdump mkinitfs
 SIMH_INIS = simh/pdp6.ini simh/pdp10-ka.ini simh/pdp10-ki.ini simh/pdp10-kl.ini simh/pdp10-ks.ini
 SIMH_NAMES = pdp6.ini pdp10-ka.ini pdp10-ki.ini pdp10-kl.ini pdp10-ks.ini
 STALE_TOOLS = pdp10-dec-none-ar pdp10-dec-none-ranlib dxr2rim mkrim mkrim.py p10bare p10bare.py
 
 all: ${TOOLS}
+
+d6lz: d6lz.c
+	${CC} ${CFLAGS} -std=c99 -Wall -Wextra -Werror -o $@ d6lz.c
 
 mkdsk: mkdsk.c
 	${CC} ${CFLAGS} -o $@ mkdsk.c

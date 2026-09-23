@@ -316,7 +316,7 @@ static uint64_t *load_dxr(const char *path, unsigned *wordsp)
         long size;
         unsigned char raw[8];
         uint64_t *words;
-        unsigned n, i, image, reloc;
+        unsigned n, i, image, reloc, flags;
         uint64_t dxr;
 
         fp = fopen(path, "rb");
@@ -350,8 +350,20 @@ static uint64_t *load_dxr(const char *path, unsigned *wordsp)
         if (((words[0] >> 18) & HALF_MASK) != dxr)
                 die("input is not a DXR executable");
         image = (unsigned)((words[1] >> 18) & HALF_MASK);
+        flags = (unsigned)(words[1] & 0700000U);
         reloc = (image + 35U) / 36U;
-        if (n == 3U + image + reloc) {
+        if ((flags & 0100000U) != 0U) {
+                uint64_t tx2;
+                unsigned text;
+
+                if (n <= 3U + reloc)
+                        die("compressed DXR executable has empty payload");
+                tx2 = ((uint64_t)('T' - 040) << 12) |
+                    ((uint64_t)('X' - 040) << 6) | (uint64_t)('2' - 040);
+                text = (unsigned)((words[2] >> 18) & HALF_MASK);
+                if ((words[2] & HALF_MASK) != tx2 || text > image)
+                        die("compressed DXR executable requires valid DXR2 metadata");
+        } else if (n == 3U + image + reloc) {
                 uint64_t tx2;
                 unsigned text;
 
@@ -363,6 +375,45 @@ static uint64_t *load_dxr(const char *path, unsigned *wordsp)
         } else if (n != 2U + image + reloc) {
                 die("DXR executable has inconsistent length");
         }
+        *wordsp = n;
+        return words;
+}
+
+static uint64_t *load_binwords(const char *path, unsigned *wordsp)
+{
+        FILE *fp;
+        long size;
+        uint64_t *words;
+        unsigned char raw[8];
+        unsigned n;
+        unsigned i;
+
+        fp = fopen(path, "rb");
+        if (fp == NULL)
+                die_path(path);
+        if (fseek(fp, 0L, SEEK_END) != 0 || (size = ftell(fp)) < 0)
+                die_path(path);
+        rewind(fp);
+        if ((size % 8L) != 0L)
+                die("binary word file has partial word");
+        if ((unsigned long)size / 8UL > (unsigned long)UINT_MAX)
+                die("binary word file is too large");
+        n = (unsigned)((unsigned long)size / 8UL);
+        words = n == 0U ? NULL : calloc(n, sizeof(*words));
+        if (n != 0U && words == NULL)
+                die("out of memory");
+        for (i = 0U; i < n; ++i) {
+                uint64_t v;
+
+                if (fread(raw, 1U, 8U, fp) != 8U)
+                        die_path(path);
+                v = get64le(raw);
+                if ((v & ~WORD_MASK) != 0U)
+                        die("binary word exceeds 36 bits");
+                words[i] = v;
+        }
+        if (fclose(fp) != 0)
+                die_path(path);
         *wordsp = n;
         return words;
 }
@@ -489,11 +540,14 @@ static void parse_file_spec(const char *spec)
         } else if (strcmp(enc, "words") == 0) {
                 nodes[idx].data = load_words(host, &nodes[idx].data_words);
                 nodes[idx].tail = nodes[idx].data_words == 0U ? 0U : 4U;
+        } else if (strcmp(enc, "binwords") == 0) {
+                nodes[idx].data = load_binwords(host, &nodes[idx].data_words);
+                nodes[idx].tail = nodes[idx].data_words == 0U ? 0U : 4U;
         } else if (strcmp(enc, "text") == 0) {
                 nodes[idx].data = load_text(host, &nodes[idx].data_words,
                     &nodes[idx].tail);
         } else {
-                die("unsupported encoding (use dxr, words or text)");
+                die("unsupported encoding (use dxr, words, binwords or text)");
         }
         free(copy);
 }
@@ -958,7 +1012,7 @@ static void usage(void)
 {
         fprintf(stderr,
             "usage: mkd6fs -n members -d diskdir "
-            "[-D PATH:MODE] [-f PATH:HOST:MODE:dxr|words|text] "
+            "[-D PATH:MODE] [-f PATH:HOST:MODE:dxr|words|binwords|text] "
             "[-l PATH:TARGET:MODE] [...]\n");
         exit(2);
 }

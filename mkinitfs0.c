@@ -410,6 +410,7 @@ static unsigned int *load_dxr_nonets(const char *path, int *nout)
 	unsigned int *out;
 	word_t dxr_lh;
 	int image_words, reloc_words;
+	int dxr_flags;
 
 	f = fopen(path, "rb");
 	if (!f) { perror(path); exit(1); }
@@ -457,8 +458,20 @@ static unsigned int *load_dxr_nonets(const char *path, int *nout)
 	if (((words[0] >> 18) & 0777777ULL) != dxr_lh)
 		die("%s: not a DXR executable", path);
 	image_words = (int)((words[1] >> 18) & 0777777ULL);
+	dxr_flags = (int)(words[1] & 0700000ULL);
 	reloc_words = (image_words + 35) / 36;
-	if (nwords == 2 + image_words + reloc_words)
+	if ((dxr_flags & 0100000) != 0) {
+		word_t tx2 = ((word_t)('T' - 040) << 12)
+		           | ((word_t)('X' - 040) << 6)
+		           |  (word_t)('2' - 040);
+		word_t text_words;
+		if (nwords <= 3 + reloc_words)
+			die("%s: compressed DXR payload is empty", path);
+		text_words = (words[2] >> 18) & 0777777ULL;
+		if ((words[2] & 0777777ULL) != tx2 ||
+		    text_words > (word_t)image_words)
+			die("%s: compressed DXR requires valid DXR2 metadata", path);
+	} else if (nwords == 2 + image_words + reloc_words)
 		;
 	else if (nwords == 3 + image_words + reloc_words) {
 		word_t tx2 = ((word_t)('T' - 040) << 12)
