@@ -83,48 +83,20 @@ static uint64_t read_word(FILE *fp)
 static int tail_map(const struct d6m_set *set, unsigned tail_blocks,
     unsigned logical, unsigned *memberp, unsigned *sectorp)
 {
-        unsigned floor, next, width, zone, rel, slot, i, absolute, total;
+        unsigned member, rel;
 
-        if (set == NULL || memberp == NULL || sectorp == NULL || tail_blocks == 0U)
+        if (set == NULL || memberp == NULL || sectorp == NULL ||
+            tail_blocks == 0U || set->members == 0U ||
+            logical >= tail_blocks * set->members)
                 return -1;
-        total = d6m_total_blocks(set);
-        if (logical >= tail_blocks * set->members)
+        member = logical % set->members;
+        rel = logical / set->members;
+        if (tail_blocks > set->member[member].sectors ||
+            rel >= tail_blocks)
                 return -1;
-        absolute = total + logical;
-        floor = 0U;
-        for (;;) {
-                next = 0U;
-                width = 0U;
-                for (i = 0U; i < set->members; ++i) {
-                        unsigned blocks = set->member[i].blocks + tail_blocks;
-                        if (blocks > floor) {
-                                ++width;
-                                if (next == 0U || blocks < next)
-                                        next = blocks;
-                        }
-                }
-                if (width == 0U || next <= floor)
-                        return -1;
-                zone = (next - floor) * width;
-                if (absolute < zone)
-                        break;
-                absolute -= zone;
-                floor = next;
-        }
-        rel = absolute / width;
-        slot = absolute % width;
-        for (i = 0U; i < set->members; ++i) {
-                unsigned blocks = set->member[i].blocks + tail_blocks;
-                if (blocks <= floor)
-                        continue;
-                if (slot == 0U) {
-                        *memberp = i;
-                        *sectorp = set->member[i].base + floor + rel;
-                        return *sectorp < set->member[i].sectors ? 0 : -1;
-                }
-                --slot;
-        }
-        return -1;
+        *memberp = member;
+        *sectorp = set->member[member].sectors - tail_blocks + rel;
+        return 0;
 }
 
 static void save_swap_image(struct d6m_set *set, FILE *tmp, unsigned tail_blocks)
@@ -246,6 +218,7 @@ static void resize(const char *argv0, const char *dir, unsigned n,
         unsigned selected, dirty_selected, old_total, new_total, i, b, new_map_blocks;
         unsigned old_tail;
         unsigned new_blocks[D6M_MAX_MEMBERS];
+        unsigned spare_blocks[D6M_MAX_MEMBERS];
         char err[256], tmppath[1024];
         const char *tmpdir;
         FILE *tmp;
@@ -291,10 +264,18 @@ static void resize(const char *argv0, const char *dir, unsigned n,
         old_tail = oldset.layout.swap_tail_blocks;
         new_total = 0;
         for (i = 0; i < n; ++i) {
-                if (new_tail >= oldset.member[i].sectors - oldset.member[i].base)
+                unsigned occupied;
+
+                occupied = oldset.member[i].base + oldset.member[i].blocks +
+                    old_tail;
+                if (occupied > oldset.member[i].sectors)
+                        die("invalid member geometry before swap resize");
+                spare_blocks[i] = oldset.member[i].sectors - occupied;
+                if (new_tail + spare_blocks[i] >=
+                    oldset.member[i].sectors - oldset.member[i].base)
                         die("requested swap tail leaves no D6FS blocks on a member");
                 new_blocks[i] = oldset.member[i].sectors -
-                    oldset.member[i].base - new_tail;
+                    oldset.member[i].base - new_tail - spare_blocks[i];
                 new_total += new_blocks[i];
         }
         new_map_blocks = (new_total + D6M_BITS_PER_MAP_BLOCK - 1U) /

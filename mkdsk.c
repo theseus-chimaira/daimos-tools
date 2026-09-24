@@ -249,7 +249,7 @@ static void make_db1(unsigned long long *words, struct member *m)
 static void make_dbx(unsigned long long *words, unsigned mask,
     unsigned index, unsigned count, int compact, const struct member *m,
     int d6fs_layout, unsigned super_a, unsigned super_b, unsigned swap_tail,
-    unsigned bootstream_blocks, unsigned logstore_start,
+    unsigned spare_blocks, unsigned bootstream_blocks, unsigned logstore_start,
     unsigned logstore_blocks, unsigned badmap_start, unsigned badmap_blocks)
 {
         zero_sector(words);
@@ -261,11 +261,12 @@ static void make_dbx(unsigned long long *words, unsigned mask,
                 unsigned usable;
 
                 if (m->boot_start >= m->sectors ||
-                    swap_tail >= m->sectors - m->boot_start) {
+                    swap_tail >= m->sectors - m->boot_start ||
+                    spare_blocks > m->sectors - m->boot_start - swap_tail) {
                         fprintf(stderr, "mkdsk: D6FS layout leaves no usable sectors\n");
                         exit(1);
                 }
-                usable = m->sectors - m->boot_start - swap_tail;
+                usable = m->sectors - m->boot_start - swap_tail - spare_blocks;
                 words[D6FS_LAYOUT_MAGIC_WORD] = D6FS_LAYOUT_MAGIC;
                 words[D6FS_LAYOUT_RANGE_WORD] =
                     ((unsigned long long)m->boot_start << 18) | usable;
@@ -346,7 +347,7 @@ static void usage(void)
         fprintf(stderr,
             "usage: mkdsk -n members [-M member-mask] "
             "-m clean|db0|db1|bad -p words -o dir "
-            "[--d6fs-layout --logstore-blocks n --badmap-blocks n --swap-tail-blocks n] "
+            "[--d6fs-layout --logstore-blocks n --badmap-blocks n --spare-blocks n --swap-tail-blocks n] "
             "[--member-sectors s0[,s1...]]\n");
         exit(2);
 }
@@ -366,7 +367,7 @@ int main(int argc, char **argv)
 {
         const char *mode = NULL, *payload_path = NULL, *outdir = NULL;
         unsigned n = 0, member_mask = 0, payload_count, logical_sectors;
-        unsigned logstore_blocks = 0, badmap_blocks = 1, swap_tail_blocks = 0;
+        unsigned logstore_blocks = 0, badmap_blocks = 1, spare_blocks = 0, swap_tail_blocks = 0;
         const char *member_sectors_arg = NULL;
         unsigned super_a = 0, super_b = 0;
         int d6fs_layout = 0;
@@ -396,6 +397,8 @@ int main(int argc, char **argv)
                         logstore_blocks = (unsigned)strtoul(argv[++i], NULL, 0);
                 else if (strcmp(argv[i], "--badmap-blocks") == 0 && i + 1 < argc)
                         badmap_blocks = (unsigned)strtoul(argv[++i], NULL, 0);
+                else if (strcmp(argv[i], "--spare-blocks") == 0 && i + 1 < argc)
+                        spare_blocks = (unsigned)strtoul(argv[++i], NULL, 0);
                 else if (strcmp(argv[i], "--swap-tail-blocks") == 0 && i + 1 < argc)
                         swap_tail_blocks = (unsigned)strtoul(argv[++i], NULL, 0);
                 else if (strcmp(argv[i], "--member-sectors") == 0 && i + 1 < argc)
@@ -503,7 +506,7 @@ int main(int argc, char **argv)
         for (u = 0; u < n; u++) {
                 make_dbx(sector, member_mask, logical_index[u], n, compact,
                     &members[u], d6fs_layout, super_a, super_b, swap_tail_blocks,
-                    logical_sectors, logical_sectors, logstore_blocks,
+                    spare_blocks, logical_sectors, logical_sectors, logstore_blocks,
                     logical_sectors + logstore_blocks, badmap_blocks);
                 write_sector(files[u], members[u].dbx_sector, sector);
                 if (!compact) {

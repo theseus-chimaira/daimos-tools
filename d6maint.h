@@ -27,6 +27,10 @@
 #define D6M_LAYOUT_BADMAP_START     016U
 #define D6M_LAYOUT_BADMAP_BLOCKS    017U
 #define D6M_BADMAP_MAGIC            0442642414422ULL
+#define D6M_BADMAP_HEADER_WORDS     4U
+#define D6M_BADMAP_MEMBER_SHIFT     16U
+#define D6M_BADMAP_MEMBER_MASK      03U
+#define D6M_BADMAP_BLOCK_MASK       0177777U
 #define D6M_EXTENT_LOW_BITS         12U
 #define D6M_EXTENT_LOW_MASK         07777ULL
 #define D6M_EXTENT_HIGH_MASK        037ULL
@@ -88,6 +92,8 @@ struct d6m_set {
         unsigned members;
         struct d6m_layout layout;
         int writable;
+        uint64_t *badmap;
+        unsigned badmap_count;
 };
 
 int d6m_open(struct d6m_set *set, const char *dir, unsigned members,

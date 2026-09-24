@@ -1,4 +1,4 @@
-/* d6bad.c - offline physical bad-sector maintenance for D6FS V2 disksets. */
+/* d6bad.c - offline stable source->spare remap maintenance for D6FS sets. */
 
 #include "d6maint.h"
 
@@ -6,7 +6,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-struct bad_run {
+struct bad_source {
         unsigned member;
         unsigned start;
         unsigned count;
@@ -18,7 +18,7 @@ static void die(const char *msg)
         exit(1);
 }
 
-static int parse_run(const char *s, struct bad_run *r)
+static int parse_source(const char *s, struct bad_source *r)
 {
         char *copy, *p, *q, *end;
         unsigned long a, b, c;
@@ -46,7 +46,7 @@ static int parse_run(const char *s, struct bad_run *r)
                 free(copy);
                 return -1;
         }
-        c = 1;
+        c = 1U;
         if (q != NULL) {
                 c = strtoul(q, &end, 0);
                 if (*end != '\0') {
@@ -55,8 +55,8 @@ static int parse_run(const char *s, struct bad_run *r)
                 }
         }
         free(copy);
-        if (a > D6M_HALF_MASK || b > D6M_HALF_MASK || c == 0 ||
-            c > D6M_HALF_MASK)
+        if (a > D6M_BADMAP_MEMBER_MASK || b > D6M_BADMAP_BLOCK_MASK ||
+            c == 0U || c > D6M_BADMAP_BLOCK_MASK)
                 return -1;
         r->member = (unsigned)a;
         r->start = (unsigned)b;
@@ -64,163 +64,112 @@ static int parse_run(const char *s, struct bad_run *r)
         return 0;
 }
 
-static uint64_t *load_badmap(struct d6m_set *set, unsigned *countp,
-    unsigned *capacityp)
+static uint64_t locator(unsigned member, unsigned sector)
 {
-        uint64_t *words;
-        unsigned b, count, cap;
-
-        if (set->layout.badmap_blocks == 0)
-                die("diskset has no reserved bad-block table");
-        words = calloc((size_t)set->layout.badmap_blocks * D6M_BLOCK_WORDS,
-            sizeof(*words));
-        if (words == NULL)
-                die("out of memory");
-        for (b = 0; b < set->layout.badmap_blocks; ++b)
-                if (d6m_read(set, set->layout.badmap_start + b,
-                    words + (size_t)b * D6M_BLOCK_WORDS) != 0)
-                        die("cannot read bad-block table");
-        if (words[0] != D6M_BADMAP_MAGIC)
-                die("invalid bad-block table magic");
-        cap = (set->layout.badmap_blocks * D6M_BLOCK_WORDS - 4U) / 2U;
-        count = (unsigned)words[2];
-        if (count > cap)
-                die("bad-block table count exceeds reserved capacity");
-        *countp = count;
-        *capacityp = cap;
-        return words;
+        return ((uint64_t)member << D6M_BADMAP_MEMBER_SHIFT) | sector;
 }
 
-static void decode_run(const uint64_t *words, unsigned i, struct bad_run *r)
+static int cmp_word(const void *av, const void *bv)
 {
-        uint64_t a = words[4U + i * 2U];
-        r->member = (unsigned)((a >> 18) & D6M_HALF_MASK);
-        r->start = (unsigned)(a & D6M_HALF_MASK);
-        r->count = (unsigned)words[5U + i * 2U];
+        uint64_t a = *(const uint64_t *)av;
+        uint64_t b = *(const uint64_t *)bv;
+        uint64_t as = (a >> 18) & D6M_HALF_MASK;
+        uint64_t bs = (b >> 18) & D6M_HALF_MASK;
+        return as < bs ? -1 : as > bs ? 1 : 0;
 }
 
-static void encode_run(uint64_t *words, unsigned i, const struct bad_run *r)
+static int replacement_used(const uint64_t *entries, unsigned count,
+    unsigned member, unsigned sector)
 {
-        words[4U + i * 2U] = ((uint64_t)r->member << 18) | r->start;
-        words[5U + i * 2U] = r->count;
-}
+        unsigned i;
+        uint64_t want = locator(member, sector);
 
-static int cmp_run(const void *av, const void *bv)
-{
-        const struct bad_run *a = av, *b = bv;
-        if (a->member != b->member)
-                return a->member < b->member ? -1 : 1;
-        if (a->start != b->start)
-                return a->start < b->start ? -1 : 1;
-        return 0;
-}
-
-static unsigned merge_runs(struct bad_run *runs, unsigned n)
-{
-        unsigned in, out;
-
-        if (n == 0)
-                return 0;
-        qsort(runs, n, sizeof(*runs), cmp_run);
-        out = 0;
-        for (in = 1; in < n; ++in) {
-                unsigned end = runs[out].start + runs[out].count;
-                if (runs[out].member == runs[in].member && runs[in].start <= end) {
-                        unsigned nend = runs[in].start + runs[in].count;
-                        if (nend > end)
-                                runs[out].count = nend - runs[out].start;
-                } else
-                        runs[++out] = runs[in];
-        }
-        return out + 1U;
-}
-
-static int write_badmap(struct d6m_set *set, uint64_t *words,
-    const struct bad_run *runs, unsigned count)
-{
-        unsigned b, i;
-
-        memset(words + 4, 0,
-            ((size_t)set->layout.badmap_blocks * D6M_BLOCK_WORDS - 4U) *
-            sizeof(*words));
-        words[0] = D6M_BADMAP_MAGIC;
-        words[1] = (words[1] + 1U) & D6M_WORD_MASK;
-        words[2] = count;
-        words[3] = 0;
         for (i = 0; i < count; ++i)
-                encode_run(words, i, &runs[i]);
-        for (b = 0; b < set->layout.badmap_blocks; ++b)
-                if (d6m_write(set, set->layout.badmap_start + b,
-                    words + (size_t)b * D6M_BLOCK_WORDS) != 0)
-                        return -1;
+                if ((entries[i] & D6M_HALF_MASK) == want)
+                        return 1;
         return 0;
 }
 
-static void list_runs(const struct d6m_set *set, const uint64_t *words,
+static int source_exists(const uint64_t *entries, unsigned count,
+    unsigned member, unsigned sector)
+{
+        unsigned i;
+        uint64_t want = locator(member, sector);
+
+        for (i = 0; i < count; ++i)
+                if (((entries[i] >> 18) & D6M_HALF_MASK) == want)
+                        return 1;
+        return 0;
+}
+
+static int source_is_badmap(const struct d6m_set *set, unsigned member,
+    unsigned sector)
+{
+        unsigned i;
+
+        for (i = 0U; i < set->layout.badmap_blocks; ++i) {
+                unsigned m, local;
+                if (d6m_map(set, set->layout.badmap_start + i, &m, &local) == 0 &&
+                    m == member && set->member[m].base + local == sector)
+                        return 1;
+        }
+        return 0;
+}
+
+static unsigned choose_spare(const struct d6m_set *set, const uint64_t *entries,
+    unsigned count, unsigned member)
+{
+        const struct d6m_member *m;
+        unsigned first, sector;
+
+        m = &set->member[member];
+        first = m->base + m->blocks + set->layout.swap_tail_blocks;
+        for (sector = first; sector < m->sectors; ++sector)
+                if (!replacement_used(entries, count, member, sector) &&
+                    !source_exists(entries, count, member, sector))
+                        return sector;
+        return ~0U;
+}
+
+static void list_map(const struct d6m_set *set)
+{
+        unsigned i;
+
+        printf("badmap entries=%u capacity=%u\n", set->badmap_count,
+            set->layout.badmap_blocks * D6M_BLOCK_WORDS -
+            D6M_BADMAP_HEADER_WORDS);
+        for (i = 0; i < set->badmap_count; ++i) {
+                uint64_t source = (set->badmap[i] >> 18) & D6M_HALF_MASK;
+                uint64_t spare = set->badmap[i] & D6M_HALF_MASK;
+                printf("source=%u:%o spare=%u:%o\n",
+                    (unsigned)((source >> D6M_BADMAP_MEMBER_SHIFT) &
+                    D6M_BADMAP_MEMBER_MASK),
+                    (unsigned)(source & D6M_BADMAP_BLOCK_MASK),
+                    (unsigned)((spare >> D6M_BADMAP_MEMBER_SHIFT) &
+                    D6M_BADMAP_MEMBER_MASK),
+                    (unsigned)(spare & D6M_BADMAP_BLOCK_MASK));
+        }
+}
+
+static int write_map(struct d6m_set *set, const uint64_t *entries,
     unsigned count)
 {
-        unsigned i, p;
-        struct bad_run r;
+        uint64_t block[D6M_BLOCK_WORDS];
+        unsigned m, local;
 
-        printf("badmap seq=%llo entries=%u capacity=%u\n",
-            (unsigned long long)words[1], count,
-            (set->layout.badmap_blocks * D6M_BLOCK_WORDS - 4U) / 2U);
-        for (i = 0; i < count; ++i) {
-                decode_run(words, i, &r);
-                printf("member=%u physical=%o count=%o logical=", r.member,
-                    r.start, r.count);
-                for (p = 0; p < r.count; ++p) {
-                        unsigned logical;
-                        if (r.member < set->members &&
-                            r.start + p >= set->member[r.member].base &&
-                            r.start + p < set->member[r.member].base +
-                            set->member[r.member].blocks &&
-                            d6m_inverse_map(set, r.member,
-                            r.start + p - set->member[r.member].base,
-                            &logical) == 0)
-                                printf("%s%o", p == 0 ? "" : ",", logical);
-                        else
-                                printf("%s-", p == 0 ? "" : ",");
-                }
-                putchar('\n');
-        }
-}
-
-static void load_maps(struct d6m_set *set, const struct d6m_super *s,
-    uint64_t **freemapp, uint64_t **summaryp)
-{
-        uint64_t *fm, *sum;
-        unsigned b;
-
-        fm = calloc((size_t)s->freemap_blocks * D6M_BLOCK_WORDS, sizeof(*fm));
-        sum = calloc((size_t)s->summary_blocks * D6M_BLOCK_WORDS, sizeof(*sum));
-        if (fm == NULL || sum == NULL)
-                die("out of memory");
-        for (b = 0; b < s->freemap_blocks; ++b)
-                if (d6m_read(set, s->freemap_start + b,
-                    fm + (size_t)b * D6M_BLOCK_WORDS) != 0)
-                        die("cannot read free map");
-        for (b = 0; b < s->summary_blocks; ++b)
-                if (d6m_read(set, s->summary_start + b,
-                    sum + (size_t)b * D6M_BLOCK_WORDS) != 0)
-                        die("cannot read free summary");
-        *freemapp = fm;
-        *summaryp = sum;
-}
-
-static int write_maps(struct d6m_set *set, const struct d6m_super *s,
-    const uint64_t *fm, const uint64_t *sum)
-{
-        unsigned b;
-        for (b = 0; b < s->freemap_blocks; ++b)
-                if (d6m_write(set, s->freemap_start + b,
-                    fm + (size_t)b * D6M_BLOCK_WORDS) != 0)
-                        return -1;
-        for (b = 0; b < s->summary_blocks; ++b)
-                if (d6m_write(set, s->summary_start + b,
-                    sum + (size_t)b * D6M_BLOCK_WORDS) != 0)
-                        return -1;
-        return 0;
+        if (set->layout.badmap_blocks != 1U ||
+            count > D6M_BLOCK_WORDS - D6M_BADMAP_HEADER_WORDS)
+                return -1;
+        memset(block, 0, sizeof(block));
+        block[0] = D6M_BADMAP_MAGIC;
+        block[1] = 1U;
+        block[2] = count;
+        if (count != 0U)
+                memcpy(block + D6M_BADMAP_HEADER_WORDS, entries,
+                    count * sizeof(*entries));
+        if (d6m_map(set, set->layout.badmap_start, &m, &local) != 0)
+                return -1;
+        return d6m_write_phys(set, m, set->member[m].base + local, block);
 }
 
 static void usage(void)
@@ -234,122 +183,79 @@ static void usage(void)
 int main(int argc, char **argv)
 {
         const char *dir = NULL, *add = NULL;
-        unsigned n = 0, selected, count, old_count, capacity, i, add_logical_count;
-        int list = 0, a;
+        unsigned n = 0, i, a;
+        int list = 0;
         char err[256];
         struct d6m_set set;
-        struct d6m_super super;
-        uint64_t super_block[D6M_BLOCK_WORDS], dirty_block[D6M_BLOCK_WORDS];
-        uint64_t *words, *fm, *sum;
-        struct d6m_super dirty_super;
-        unsigned dirty_selected;
-        struct bad_run nr, *runs;
+        struct bad_source src;
+        uint64_t *entries;
 
-        for (a = 1; a < argc; ++a) {
-                if (strcmp(argv[a], "-n") == 0 && a + 1 < argc)
+        for (a = 1; a < (unsigned)argc; ++a) {
+                if (strcmp(argv[a], "-n") == 0 && a + 1U < (unsigned)argc)
                         n = (unsigned)strtoul(argv[++a], NULL, 0);
-                else if (strcmp(argv[a], "-d") == 0 && a + 1 < argc)
+                else if (strcmp(argv[a], "-d") == 0 && a + 1U < (unsigned)argc)
                         dir = argv[++a];
                 else if (strcmp(argv[a], "--list") == 0)
                         list = 1;
-                else if (strcmp(argv[a], "--add") == 0 && a + 1 < argc)
+                else if (strcmp(argv[a], "--add") == 0 && a + 1U < (unsigned)argc)
                         add = argv[++a];
                 else
                         usage();
         }
-        if (dir == NULL || n == 0 || n > D6M_MAX_MEMBERS ||
+        if (dir == NULL || n == 0U || n > D6M_MAX_MEMBERS ||
             ((list != 0) == (add != NULL)))
                 usage();
-
         if (d6m_open(&set, dir, n, add != NULL, err, sizeof(err)) != 0)
                 die(err);
-        words = load_badmap(&set, &count, &capacity);
+        if (set.layout.badmap_blocks != 1U)
+                die("v1 requires exactly one atomic BADMAP block");
         if (list) {
-                list_runs(&set, words, count);
-                free(words);
+                list_map(&set);
                 d6m_close(&set);
                 return 0;
         }
-        if (parse_run(add, &nr) != 0 || nr.member >= set.members ||
-            nr.start < set.member[nr.member].base ||
-            nr.start >= set.member[nr.member].base + set.member[nr.member].blocks ||
-            nr.count > set.member[nr.member].base + set.member[nr.member].blocks -
-            nr.start)
-                die("bad run must lie wholly inside one member's D6FS physical range");
-        if (d6m_run_fsck(argv[0], dir, n, 0) != 0)
-                die("pre-maintenance d6fsck failed");
-        if (d6m_select_super(&set, &super, &selected, super_block,
-            err, sizeof(err)) != 0)
-                die(err);
-        load_maps(&set, &super, &fm, &sum);
-
-        /* Existing entries make --add idempotent. */
-        old_count = count;
-        runs = calloc(capacity + 1U, sizeof(*runs));
-        if (runs == NULL)
+        if (parse_source(add, &src) != 0 || src.member >= set.members)
+                die("invalid source range");
+        if (src.start < set.member[src.member].base ||
+            src.start >= set.member[src.member].base + set.member[src.member].blocks +
+            set.layout.swap_tail_blocks ||
+            src.count > set.member[src.member].base + set.member[src.member].blocks +
+            set.layout.swap_tail_blocks - src.start)
+                die("source must lie in exported data or raw tail");
+        if (set.badmap_count + src.count >
+            D6M_BLOCK_WORDS - D6M_BADMAP_HEADER_WORDS)
+                die("BADMAP is full");
+        entries = calloc(set.badmap_count + src.count, sizeof(*entries));
+        if (entries == NULL)
                 die("out of memory");
-        for (i = 0; i < count; ++i)
-                decode_run(words, i, &runs[i]);
-        runs[count++] = nr;
-        count = merge_runs(runs, count);
-        if (count > capacity)
-                die("bad-block table is full");
-
-        /* Refuse to condemn blocks that are currently allocated unless they
-         * were already in the bad table.  This avoids silently discarding file
-         * data; data recovery/relocation must happen first. */
-        add_logical_count = 0;
-        for (i = 0; i < nr.count; ++i) {
-                unsigned logical, mbi, bit, j;
-                int already = 0;
-                struct bad_run er;
-                if (d6m_inverse_map(&set, nr.member,
-                    nr.start + i - set.member[nr.member].base, &logical) != 0)
-                        die("cannot invert unequal-stripe mapping");
-                for (j = 0; j < old_count; ++j) {
-                        decode_run(words, j, &er);
-                        if (er.member == nr.member && nr.start + i >= er.start &&
-                            nr.start + i < er.start + er.count) {
-                                already = 1;
-                                break;
-                        }
-                }
-                mbi = logical / D6M_BITS_PER_MAP_BLOCK;
-                bit = logical % D6M_BITS_PER_MAP_BLOCK;
-                if (!already && d6m_get_bit(fm +
-                    (size_t)mbi * D6M_BLOCK_WORDS, bit))
-                        die("new bad sector maps to an allocated block; recover or relocate it first");
-                ++add_logical_count;
+        if (set.badmap_count != 0U)
+                memcpy(entries, set.badmap,
+                    set.badmap_count * sizeof(*entries));
+        for (i = 0; i < src.count; ++i) {
+                unsigned source = src.start + i;
+                unsigned spare;
+                uint64_t block[D6M_BLOCK_WORDS];
+                if (source_is_badmap(&set, src.member, source))
+                        die("BADMAP metadata cannot remap itself");
+                if (source_exists(entries, set.badmap_count, src.member, source))
+                        continue;
+                spare = choose_spare(&set, entries, set.badmap_count, src.member);
+                if (spare == ~0U)
+                        die("no reserved spare block remains on source member");
+                if (d6m_read_phys(&set, src.member, source, block) != 0)
+                        die("source cannot be recovered; remap would lose data");
+                if (d6m_write_phys(&set, src.member, spare, block) != 0)
+                        die("cannot initialize spare block");
+                entries[set.badmap_count++] =
+                    (locator(src.member, source) << 18) |
+                    locator(src.member, spare);
         }
-
-        /* Publish physical failure knowledge first.  If power is lost before
-         * the free map update, d6fsck -r deterministically marks these blocks
-         * allocated from the bad table. */
-        if (d6m_begin_dirty(&set, &super, selected, super_block, &dirty_super,
-            &dirty_selected, dirty_block) != 0)
-                die("cannot publish DIRTY state before bad-block maintenance");
-        if (write_badmap(&set, words, runs, count) != 0)
-                die("cannot write bad-block table");
-        for (i = 0; i < nr.count; ++i) {
-                unsigned logical, mbi, bit;
-                if (d6m_inverse_map(&set, nr.member,
-                    nr.start + i - set.member[nr.member].base, &logical) != 0)
-                        die("cannot invert unequal-stripe mapping");
-                mbi = logical / D6M_BITS_PER_MAP_BLOCK;
-                bit = logical % D6M_BITS_PER_MAP_BLOCK;
-                d6m_set_bit(fm + (size_t)mbi * D6M_BLOCK_WORDS, bit, 1);
-        }
-        d6m_rebuild_summary(&super, fm, sum);
-        if (write_maps(&set, &super, fm, sum) != 0)
-                die("cannot write bad-block allocation exclusions");
-        if (d6m_publish_clean(&set, &dirty_super, dirty_selected, dirty_block,
-            NULL) != 0)
-                die("cannot publish CLEAN superblock after bad-block update");
+        qsort(entries, set.badmap_count, sizeof(*entries), cmp_word);
+        if (write_map(&set, entries, set.badmap_count) != 0)
+                die("cannot publish BADMAP");
+        fprintf(stderr, "d6bad: BADMAP published with %u remap(s)\n",
+            set.badmap_count);
+        free(entries);
         d6m_close(&set);
-        free(runs); free(sum); free(fm); free(words);
-        if (d6m_run_fsck(argv[0], dir, n, 0) != 0)
-                die("post-maintenance d6fsck failed");
-        fprintf(stderr, "d6bad: recorded %u physical sector(s); filesystem clean\n",
-            add_logical_count);
         return 0;
 }

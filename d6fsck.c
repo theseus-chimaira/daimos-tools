@@ -125,6 +125,8 @@ static unsigned member_count;
 static unsigned errors;
 static unsigned repairs;
 static int repair_mode;
+static uint64_t badmap_entries[BLOCK_WORDS - 4U];
+static unsigned badmap_entry_count;
 
 struct dir_patch {
         unsigned dir;
@@ -215,13 +217,41 @@ static int map_logical(unsigned logical, unsigned *memberp, unsigned *blockp)
         return -1;
 }
 
+static int remap_phys(unsigned *memberp, unsigned *sectorp)
+{
+        uint64_t source;
+        unsigned i;
+
+        source = ((uint64_t)*memberp << 16) | *sectorp;
+        for (i = 0; i < badmap_entry_count; ++i) {
+                uint64_t word = badmap_entries[i];
+                uint64_t key = (word >> 18) & HALF_MASK;
+                uint64_t spare;
+                if (key > source)
+                        break;
+                if (key != source)
+                        continue;
+                spare = word & HALF_MASK;
+                *memberp = (unsigned)((spare >> 16) & 03U);
+                *sectorp = (unsigned)(spare & 0177777U);
+                if (*memberp >= member_count || *sectorp >= members[*memberp].sectors)
+                        return -1;
+                break;
+        }
+        return 0;
+}
+
 static int read_logical(unsigned logical, uint64_t block[BLOCK_WORDS])
 {
         unsigned mi, local;
 
+        unsigned sector;
         if (map_logical(logical, &mi, &local) != 0)
                 return -1;
-        return read_phys(&members[mi], members[mi].base + local, block);
+        sector = members[mi].base + local;
+        if (remap_phys(&mi, &sector) != 0)
+                return -1;
+        return read_phys(&members[mi], sector, block);
 }
 
 static void put64le(unsigned char p[8], uint64_t v)
@@ -259,9 +289,13 @@ static int write_logical(unsigned logical, const uint64_t block[BLOCK_WORDS])
 {
         unsigned mi, local;
 
+        unsigned sector;
         if (map_logical(logical, &mi, &local) != 0)
                 return -1;
-        return write_phys(&members[mi], members[mi].base + local, block);
+        sector = members[mi].base + local;
+        if (remap_phys(&mi, &sector) != 0)
+                return -1;
+        return write_phys(&members[mi], sector, block);
 }
 
 static void problem(const char *what, unsigned a, unsigned b)
@@ -374,6 +408,34 @@ static void open_members(const char *dir, unsigned n, unsigned *sap,
                 if (members[i].base + members[i].blocks +
                     disk_layout.swap_tail_blocks > members[i].sectors)
                         die("D6FS/swap layout exceeds a member image");
+        badmap_entry_count = 0U;
+        if (disk_layout.badmap_blocks != 0U) {
+                unsigned mi, local, count;
+                if (disk_layout.badmap_blocks != 1U ||
+                    map_logical(disk_layout.badmap_start, &mi, &local) != 0 ||
+                    read_phys(&members[mi], members[mi].base + local, block) != 0 ||
+                    block[0] != D6FS_BADMAP_MAGIC)
+                        die("invalid BADMAP metadata");
+                count = (unsigned)block[2];
+                if (count > BLOCK_WORDS - 4U)
+                        die("BADMAP count exceeds v1 capacity");
+                memcpy(badmap_entries, block + 4U, count * sizeof(*badmap_entries));
+                for (i = 0; i < count; ++i) {
+                        uint64_t word = badmap_entries[i];
+                        uint64_t source = (word >> 18) & HALF_MASK;
+                        uint64_t replacement = word & HALF_MASK;
+                        unsigned sm = (unsigned)((source >> 16) & 03U);
+                        unsigned rm = (unsigned)((replacement >> 16) & 03U);
+                        unsigned ss = (unsigned)(source & 0177777U);
+                        unsigned rs = (unsigned)(replacement & 0177777U);
+                        if (sm >= member_count || rm >= member_count ||
+                            ss >= members[sm].sectors || rs >= members[rm].sectors ||
+                            source == replacement ||
+                            (i != 0U && ((badmap_entries[i - 1U] >> 18) & HALF_MASK) >= source))
+                                die("invalid/unsorted BADMAP entry");
+                }
+                badmap_entry_count = count;
+        }
         *sap = sa;
         *sbp = sb;
 }
@@ -689,9 +751,8 @@ static void rebuild_summary(const struct super_info *s, const uint64_t *freemap,
 
 static unsigned char **load_badmap(void)
 {
-        uint64_t *words;
         unsigned char **bad;
-        unsigned capacity, count, i, b;
+        unsigned i;
 
         bad = calloc(member_count, sizeof(*bad));
         if (bad == NULL)
@@ -701,46 +762,28 @@ static unsigned char **load_badmap(void)
                 if (bad[i] == NULL)
                         die("out of memory");
         }
-        if (disk_layout.badmap_blocks == 0U)
-                return bad;
-        words = calloc((size_t)disk_layout.badmap_blocks * BLOCK_WORDS,
-            sizeof(*words));
-        if (words == NULL)
-                die("out of memory");
-        for (b = 0; b < disk_layout.badmap_blocks; ++b)
-                if (read_logical(disk_layout.badmap_start + b,
-                    words + (size_t)b * BLOCK_WORDS) != 0)
-                        die("cannot read bad-block table");
-        if (words[0] != D6FS_BADMAP_MAGIC) {
-                problem("invalid bad-block table magic", disk_layout.badmap_start, ~0U);
-                free(words);
-                return bad;
-        }
-        capacity = (disk_layout.badmap_blocks * BLOCK_WORDS - 4U) / 2U;
-        count = (unsigned)words[2];
-        if (count > capacity) {
-                problem("bad-block table count", count, capacity);
-                free(words);
-                return bad;
-        }
-        for (i = 0; i < count; ++i) {
-                uint64_t a = words[4U + i * 2U];
-                unsigned mi = (unsigned)((a >> 18) & HALF_MASK);
-                unsigned start = (unsigned)(a & HALF_MASK);
-                unsigned run = (unsigned)words[5U + i * 2U];
-                unsigned p;
-
-                if (mi >= member_count || run == 0U || start >= members[mi].sectors ||
-                    run > members[mi].sectors - start) {
-                        problem("invalid physical bad-block run", i, ~0U);
+        for (i = 0; i < badmap_entry_count; ++i) {
+                uint64_t word = badmap_entries[i];
+                uint64_t source = (word >> 18) & HALF_MASK;
+                uint64_t spare = word & HALF_MASK;
+                unsigned sm = (unsigned)((source >> 16) & 03U);
+                unsigned ss = (unsigned)(source & 0177777U);
+                unsigned rm = (unsigned)((spare >> 16) & 03U);
+                unsigned rs = (unsigned)(spare & 0177777U);
+                if (sm >= member_count || rm >= member_count ||
+                    ss >= members[sm].sectors || rs >= members[rm].sectors ||
+                    rs < members[rm].base + members[rm].blocks +
+                    disk_layout.swap_tail_blocks) {
+                        problem("invalid BADMAP remap", i, ~0U);
                         continue;
                 }
-                for (p = start; p < start + run; ++p)
-                        if (p >= members[mi].base &&
-                            p < members[mi].base + members[mi].blocks)
-                                bad[mi][p - members[mi].base] = 1;
+                if (i != 0U &&
+                    ((badmap_entries[i - 1U] >> 18) & HALF_MASK) >= source)
+                        problem("unsorted/duplicate BADMAP source", i, ~0U);
+                if (ss >= members[sm].base &&
+                    ss < members[sm].base + members[sm].blocks)
+                        bad[sm][ss - members[sm].base] = 1;
         }
-        free(words);
         return bad;
 }
 
@@ -900,14 +943,6 @@ static int check_filesystem(unsigned sa, unsigned sb)
         mark_range(used, total, s->summary_start, s->summary_blocks, 1);
         if (s->log_blocks != 0U)
                 mark_range(used, total, s->log_start, s->log_blocks, 1);
-        for (i = 0; i < total; ++i) {
-                unsigned mi, local;
-                if (map_logical(i, &mi, &local) != 0)
-                        die("cannot map logical block while applying bad-block table");
-                if (bad_phys[mi][local])
-                        mark_range(used, total, i, 1U, 1U);
-        }
-
         for (i = 0; i < s->fcb_count; ++i) {
                 uint64_t *f = fcbs + (size_t)i * FCB_WORDS;
                 unsigned e;

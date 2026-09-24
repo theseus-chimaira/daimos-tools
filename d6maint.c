@@ -236,24 +236,60 @@ int d6m_inverse_map(const struct d6m_set *set, unsigned member, unsigned local,
         }
 }
 
+static int d6m_remap_phys(const struct d6m_set *set, unsigned *memberp,
+    unsigned *sectorp)
+{
+        uint64_t source;
+        unsigned i;
+
+        if (set == NULL || memberp == NULL || sectorp == NULL ||
+            *memberp >= set->members || *sectorp > D6M_BADMAP_BLOCK_MASK)
+                return -1;
+        source = ((uint64_t)*memberp << D6M_BADMAP_MEMBER_SHIFT) | *sectorp;
+        for (i = 0; i < set->badmap_count; ++i) {
+                uint64_t word = set->badmap[i];
+                uint64_t key = (word >> 18) & D6M_HALF_MASK;
+                uint64_t replacement;
+                if (key > source)
+                        break;
+                if (key != source)
+                        continue;
+                replacement = word & D6M_HALF_MASK;
+                *memberp = (unsigned)((replacement >> D6M_BADMAP_MEMBER_SHIFT) &
+                    D6M_BADMAP_MEMBER_MASK);
+                *sectorp = (unsigned)(replacement & D6M_BADMAP_BLOCK_MASK);
+                if (*memberp >= set->members ||
+                    *sectorp >= set->member[*memberp].sectors)
+                        return -1;
+                break;
+        }
+        return 0;
+}
+
 int d6m_read(const struct d6m_set *set, unsigned logical,
     uint64_t block[D6M_BLOCK_WORDS])
 {
-        unsigned m, local;
+        unsigned m, local, sector;
 
         if (d6m_map(set, logical, &m, &local) != 0)
                 return -1;
-        return d6m_read_phys(set, m, set->member[m].base + local, block);
+        sector = set->member[m].base + local;
+        if (d6m_remap_phys(set, &m, &sector) != 0)
+                return -1;
+        return d6m_read_phys(set, m, sector, block);
 }
 
 int d6m_write(struct d6m_set *set, unsigned logical,
     const uint64_t block[D6M_BLOCK_WORDS])
 {
-        unsigned m, local;
+        unsigned m, local, sector;
 
         if (d6m_map(set, logical, &m, &local) != 0)
                 return -1;
-        return d6m_write_phys(set, m, set->member[m].base + local, block);
+        sector = set->member[m].base + local;
+        if (d6m_remap_phys(set, &m, &sector) != 0)
+                return -1;
+        return d6m_write_phys(set, m, sector, block);
 }
 
 static int scan_member(struct d6m_set *set, unsigned mi, char *err, size_t errlen)
@@ -394,6 +430,77 @@ int d6m_open(struct d6m_set *set, const char *dir, unsigned members,
                         return -1;
                 }
         }
+        if (set->layout.badmap_blocks != 0U) {
+                uint64_t *words;
+                uint64_t previous = 0;
+                unsigned capacity, count, b, copied;
+                size_t nwords;
+                if (set->layout.badmap_blocks != 1U) {
+                        seterr(err, errlen, "BADMAP v1 requires one metadata block");
+                        d6m_close(set);
+                        return -1;
+                }
+                nwords = D6M_BLOCK_WORDS;
+                words = calloc(nwords, sizeof(*words));
+                if (words == NULL) {
+                        seterr(err, errlen, "out of memory loading badmap");
+                        d6m_close(set);
+                        return -1;
+                }
+                for (b = 0; b < set->layout.badmap_blocks; ++b) {
+                        unsigned lm, ll;
+                        if (d6m_map(set, set->layout.badmap_start + b, &lm, &ll) != 0 ||
+                            d6m_read_phys(set, lm, set->member[lm].base + ll,
+                            words + (size_t)b * D6M_BLOCK_WORDS) != 0) {
+                                free(words);
+                                seterr(err, errlen, "cannot read badmap");
+                                d6m_close(set);
+                                return -1;
+                        }
+                }
+                capacity = (unsigned)nwords - D6M_BADMAP_HEADER_WORDS;
+                count = words[0] == D6M_BADMAP_MAGIC ? (unsigned)words[2] : 0U;
+                if (words[0] != D6M_BADMAP_MAGIC || count > capacity) {
+                        free(words);
+                        seterr(err, errlen, "invalid badmap");
+                        d6m_close(set);
+                        return -1;
+                }
+                if (count != 0U) {
+                        set->badmap = calloc(count, sizeof(*set->badmap));
+                        if (set->badmap == NULL) {
+                                free(words);
+                                seterr(err, errlen, "out of memory loading badmap entries");
+                                d6m_close(set);
+                                return -1;
+                        }
+                }
+                copied = 0U;
+                for (b = D6M_BADMAP_HEADER_WORDS; b < (unsigned)nwords && copied < count; ++b) {
+                        uint64_t word = words[b];
+                        uint64_t source = (word >> 18) & D6M_HALF_MASK;
+                        uint64_t replacement = word & D6M_HALF_MASK;
+                        unsigned sm = (unsigned)((source >> D6M_BADMAP_MEMBER_SHIFT) &
+                            D6M_BADMAP_MEMBER_MASK);
+                        unsigned rm = (unsigned)((replacement >> D6M_BADMAP_MEMBER_SHIFT) &
+                            D6M_BADMAP_MEMBER_MASK);
+                        unsigned ss = (unsigned)(source & D6M_BADMAP_BLOCK_MASK);
+                        unsigned rs = (unsigned)(replacement & D6M_BADMAP_BLOCK_MASK);
+                        if (sm >= set->members || rm >= set->members ||
+                            ss >= set->member[sm].sectors ||
+                            rs >= set->member[rm].sectors || source == replacement ||
+                            (copied != 0U && source <= previous)) {
+                                free(words);
+                                seterr(err, errlen, "invalid/unsorted BADMAP entry");
+                                d6m_close(set);
+                                return -1;
+                        }
+                        set->badmap[copied++] = word;
+                        previous = source;
+                }
+                set->badmap_count = copied;
+                free(words);
+        }
         return 0;
 }
 
@@ -408,6 +515,9 @@ void d6m_close(struct d6m_set *set)
                         fclose(set->member[i].fp);
                 set->member[i].fp = NULL;
         }
+        free(set->badmap);
+        set->badmap = NULL;
+        set->badmap_count = 0U;
         set->members = 0;
 }
 
