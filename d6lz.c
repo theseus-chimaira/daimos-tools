@@ -90,6 +90,64 @@ static void write_words(const char *path, const uint64_t *w, size_t n)
         die_path(path);
 }
 
+
+static uint64_t *read_text_words(const char *path, size_t *np)
+{
+    FILE *f;
+    uint64_t *w = NULL;
+    size_t n = 0U;
+    size_t cap = 0U;
+    char line[128];
+
+    f = fopen(path, "r");
+    if (f == NULL)
+        die_path(path);
+    while (fgets(line, sizeof(line), f) != NULL) {
+        char *end;
+        unsigned long long v;
+        if (strchr(line, '\n') == NULL && !feof(f))
+            die("text word line is too long");
+        errno = 0;
+        v = strtoull(line, &end, 8);
+        if (errno != 0 || end == line)
+            die("invalid octal text word");
+        while (*end == ' ' || *end == '\t' || *end == '\r' || *end == '\n')
+            ++end;
+        if (*end != '\0' || v > WORD_MASK)
+            die("invalid octal text word");
+        if (n == cap) {
+            size_t newcap = cap == 0U ? 256U : cap * 2U;
+            uint64_t *nw = (uint64_t *)realloc(w, newcap * sizeof(*nw));
+            if (nw == NULL)
+                die("out of memory");
+            w = nw;
+            cap = newcap;
+        }
+        w[n++] = (uint64_t)v;
+    }
+    if (ferror(f))
+        die_path(path);
+    if (fclose(f) != 0)
+        die_path(path);
+    *np = n;
+    return w;
+}
+
+static void write_text_words(const char *path, const uint64_t *w, size_t n)
+{
+    FILE *f;
+    size_t i;
+
+    f = fopen(path, "w");
+    if (f == NULL)
+        die_path(path);
+    for (i = 0U; i < n; ++i)
+        if (fprintf(f, "%012llo\n", (unsigned long long)w[i]) < 0)
+            die_path(path);
+    if (fclose(f) != 0)
+        die_path(path);
+}
+
 static uint64_t six3(char a, char b, char c)
 {
     return ((uint64_t)(a - 040) << 12) |
@@ -148,13 +206,16 @@ static uint64_t *compress_words(const uint64_t *in, size_t n, size_t *outn)
     return out;
 }
 
-static void compress_raw(const char *inpath, const char *outpath)
+static void compress_raw(const char *inpath, const char *outpath, int text_mode)
 {
     uint64_t *in, *out;
     size_t n, outn;
-    in = read_words(inpath, &n);
+    in = text_mode ? read_text_words(inpath, &n) : read_words(inpath, &n);
     out = compress_words(in, n, &outn);
-    write_words(outpath, out, outn);
+    if (text_mode)
+        write_text_words(outpath, out, outn);
+    else
+        write_words(outpath, out, outn);
     free(out);
     free(in);
 }
@@ -205,24 +266,29 @@ static void compress_exec(const char *inpath, const char *outpath)
 
 static void usage(void)
 {
-    fprintf(stderr, "usage: d6lz [-x|-X] input output\n");
+    fprintf(stderr, "usage: d6lz [-t] [-x|-X] input output\n");
     exit(1);
 }
 
 int main(int argc, char **argv)
 {
     int exec_mode = 0;
+    int text_mode = 0;
     int arg = 1;
-    if (arg < argc && (strcmp(argv[arg], "-x") == 0 ||
-        strcmp(argv[arg], "-X") == 0)) {
-        exec_mode = 1;
+    while (arg < argc && argv[arg][0] == '-') {
+        if (strcmp(argv[arg], "-x") == 0 || strcmp(argv[arg], "-X") == 0)
+            exec_mode = 1;
+        else if (strcmp(argv[arg], "-t") == 0)
+            text_mode = 1;
+        else
+            usage();
         ++arg;
     }
-    if (argc - arg != 2)
+    if (argc - arg != 2 || (exec_mode && text_mode))
         usage();
     if (exec_mode)
         compress_exec(argv[arg], argv[arg + 1]);
     else
-        compress_raw(argv[arg], argv[arg + 1]);
+        compress_raw(argv[arg], argv[arg + 1], text_mode);
     return 0;
 }
