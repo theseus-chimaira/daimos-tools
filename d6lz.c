@@ -42,7 +42,7 @@ static void put64le(unsigned char b[8], uint64_t v)
 static uint64_t *read_words(const char *path, size_t *np)
 {
     FILE *f;
-    long size;
+    long size = 0;
     size_t n, i;
     uint64_t *w;
     unsigned char b[8];
@@ -162,7 +162,7 @@ static void compress_raw(const char *inpath, const char *outpath)
 static void compress_exec(const char *inpath, const char *outpath)
 {
     uint64_t *in, *payload, *out;
-    size_t n, payload_n, header, reloc, image, relpos, outn, i;
+    size_t n, payload_n, header = 0, reloc, image, relpos, outn, i;
     uint64_t dxr = six3('D', 'X', 'R');
     uint64_t tx2 = six3('T', 'X', '2');
 
