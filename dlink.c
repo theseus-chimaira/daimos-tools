@@ -9,11 +9,10 @@
 #define DXR_BSS_MASK 0077777UL
 #define DXR_F_COMPRESSED 0100000UL
 #define DXR_F_PURE   0200000UL
-#define DXR_F_IMPURE 0400000UL
+#define DXR_F_RT_REQUIRED 0400000UL
 
 #define PURITY_UNKNOWN 0
 #define PURITY_PURE    1
-#define PURITY_IMPURE  2
 struct link_object {
     struct dobj_object obj;
     unsigned long text_base;
@@ -619,7 +618,7 @@ static int write_map(const char *name, struct linker *l)
     return 0;
 }
 
-static int write_dxr(const char *name, struct linker *l, int purity_request)
+static int write_dxr(const char *name, struct linker *l, int purity_request, int rt_required)
 {
     unsigned long tw, dw, bw, iw, rw;
     struct dobj_word *image;
@@ -651,19 +650,16 @@ static int write_dxr(const char *name, struct linker *l, int purity_request)
     if (apply_relocs(l, image, relmap, NULL) != 0) {
         free(image); free(relmap); return -1;
     }
-    flags = 0UL;
+    flags = rt_required ? DXR_F_RT_REQUIRED : 0UL;
     if (definite_text_write(image, tw, &text_write_at)) {
-        flags = DXR_F_IMPURE;
         if (purity_request == PURITY_PURE) {
             fprintf(stderr,
                     "dlink: --pure contradicted by definite TEXT write at %06lo\n",
                     text_write_at);
             free(image); free(relmap); return -1;
         }
-    } else if (purity_request == PURITY_IMPURE) {
-        flags = DXR_F_IMPURE;
     } else if (purity_request == PURITY_PURE) {
-        flags = DXR_F_PURE;
+        flags |= DXR_F_PURE;
     }
     entry = l->image_base;
     for (i = 0; i < l->object_count; i++) {
@@ -884,7 +880,7 @@ static void cleanup(struct linker *l)
 
 static void usage(void)
 {
-    fprintf(stderr, "usage: dlink -o out.dxr [--pure|--impure] [--daimos-uuo-relax] [-M out.map] [-b octal] [-A map] [-R out.dobj -N symbol [-X export] ...] input.dobj|library.darc ...\n");
+    fprintf(stderr, "usage: dlink -o out.dxr [--pure] [--rt-required] [--daimos-uuo-relax] [-M out.map] [-b octal] [-A map] [-R out.dobj -N symbol [-X export] ...] input.dobj|library.darc ...\n");
 }
 
 int main(int argc, char **argv)
@@ -902,6 +898,7 @@ int main(int argc, char **argv)
     int first;
     int rc;
     int purity_request;
+    int rt_required;
 
     memset(&l, 0, sizeof(l));
     out = NULL;
@@ -913,18 +910,17 @@ int main(int argc, char **argv)
     l.image_base = 0UL;
     l.daimos_uuo_relax = 0;
     purity_request = PURITY_UNKNOWN;
+    rt_required = 0;
     first = 1;
     while (first < argc && argv[first][0] == '-') {
         if (strcmp(argv[first], "-o") == 0 && first + 1 < argc) {
             out = argv[first + 1];
             first += 2;
         } else if (strcmp(argv[first], "--pure") == 0) {
-            if (purity_request == PURITY_IMPURE) { usage(); return 1; }
             purity_request = PURITY_PURE;
             first++;
-        } else if (strcmp(argv[first], "--impure") == 0) {
-            if (purity_request == PURITY_PURE) { usage(); return 1; }
-            purity_request = PURITY_IMPURE;
+        } else if (strcmp(argv[first], "--rt-required") == 0) {
+            rt_required = 1;
             first++;
         } else if (strcmp(argv[first], "--daimos-uuo-relax") == 0) {
             l.daimos_uuo_relax = 1;
@@ -993,7 +989,7 @@ int main(int argc, char **argv)
     }
     if (resolve_archives(&l) != 0 || check_undefined(&l) != 0)
         goto done;
-    if (write_dxr(out, &l, purity_request) != 0) {
+    if (write_dxr(out, &l, purity_request, rt_required) != 0) {
         fprintf(stderr, "dlink: link failed\n");
         goto done;
     }
