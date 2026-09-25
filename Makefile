@@ -40,11 +40,11 @@ d6swap: d6swap.c d6maint.c d6maint.h
 mkdt: mkdt.c
 	${CC} ${CFLAGS} -o $@ mkdt.c
 
-mktsfs: mktsfs.c tsfs-format.c tsfs-format.h
-	${CC} ${CFLAGS} -std=c99 -o $@ mktsfs.c tsfs-format.c
+mktsfs: mktsfs.c tsfs-format.c tsfs-format.h d6lz-codec.c d6lz-codec.h
+	${CC} ${CFLAGS} -std=c99 -o $@ mktsfs.c tsfs-format.c d6lz-codec.c
 
-tsfscheck: tsfscheck.c tsfs-format.c tsfs-format.h
-	${CC} ${CFLAGS} -std=c99 -o $@ tsfscheck.c tsfs-format.c
+tsfscheck: tsfscheck.c tsfs-format.c tsfs-format.h d6lz-codec.c d6lz-codec.h
+	${CC} ${CFLAGS} -std=c99 -o $@ tsfscheck.c tsfs-format.c d6lz-codec.c
 
 mkstream: mkstream.c
 	${CC} ${CFLAGS} -o $@ mkstream.c

@@ -1,6 +1,7 @@
 /* mktsfs.c - create a TSFS DECtape set. */
 
 #include "tsfs-format.h"
+#include "d6lz-codec.h"
 
 #include <ctype.h>
 #include <errno.h>
@@ -19,11 +20,15 @@ struct tsfs_id {
 struct manifest_node {
         char path[PATH_MAX_LOCAL + 1U];
         char name[TSFS_FILE_NAME_CHARS + 1U];
+        char source[MANIFEST_LINE_MAX];
         int is_dir;
         int parent_node;
         unsigned int record_index;
         unsigned int child_start;
         unsigned int child_count;
+        unsigned int size_words;
+        unsigned int first_extent;
+        unsigned int extent_count;
 };
 
 static void
@@ -65,6 +70,93 @@ parse_id(const char *text, struct tsfs_id *id)
         if (parse_octal_word(buf, &id->hi) != 0 ||
             parse_octal_word(colon, &id->lo) != 0)
                 return -1;
+        return 0;
+}
+
+static uint64_t
+get64le(const unsigned char b[8])
+{
+        uint64_t v;
+        unsigned int i;
+
+        v = 0U;
+        for (i = 0U; i < 8U; ++i)
+                v |= (uint64_t)b[i] << (8U * i);
+        return v;
+}
+
+static int
+source_word_count(const char *path, unsigned int *wordsp)
+{
+        FILE *fp;
+        long size;
+
+        *wordsp = 0U;
+        if (path == NULL || path[0] == '\0')
+                return 0;
+        fp = fopen(path, "rb");
+        if (fp == NULL)
+                return -1;
+        if (fseek(fp, 0L, SEEK_END) != 0) {
+                fclose(fp);
+                return -1;
+        }
+        size = ftell(fp);
+        if (size < 0) {
+                fclose(fp);
+                return -1;
+        }
+        if (fclose(fp) != 0)
+                return -1;
+        if ((size & 7L) != 0L ||
+            (unsigned long)size / 8UL > (unsigned long)TSFS_HALF_MASK)
+                return -1;
+        *wordsp = (unsigned int)((unsigned long)size / 8UL);
+        return 0;
+}
+
+static int
+read_source_words(const char *path, uint64_t **wordsp, unsigned int words)
+{
+        FILE *fp;
+        uint64_t *data;
+        unsigned int i;
+        unsigned char b[8];
+
+        *wordsp = NULL;
+        if (words == 0U)
+                return 0;
+        fp = fopen(path, "rb");
+        if (fp == NULL)
+                return -1;
+        data = (uint64_t *)malloc((size_t)words * sizeof(*data));
+        if (data == NULL) {
+                fclose(fp);
+                return -1;
+        }
+        for (i = 0U; i < words; ++i) {
+                if (fread(b, 1U, 8U, fp) != 8U) {
+                        free(data);
+                        fclose(fp);
+                        return -1;
+                }
+                data[i] = get64le(b);
+                if ((data[i] & ~TSFS_WORD_MASK) != 0U) {
+                        free(data);
+                        fclose(fp);
+                        return -1;
+                }
+        }
+        if (fgetc(fp) != EOF || ferror(fp)) {
+                free(data);
+                fclose(fp);
+                return -1;
+        }
+        if (fclose(fp) != 0) {
+                free(data);
+                return -1;
+        }
+        *wordsp = data;
         return 0;
 }
 
@@ -203,14 +295,14 @@ read_manifest(const char *path, struct manifest_node **nodesp,
                         *end++ = '\0';
                         while (*end == ' ' || *end == '\t')
                                 ++end;
-                        if (*end != '\0') {
-                                fprintf(stderr,
-                                    "mktsfs: manifest line %u: V1 F records are empty and take no source path\n",
-                                    lineno);
-                                free(nodes);
-                                fclose(fp);
-                                return -1;
-                        }
+                }
+                if (is_dir && *end != '\0') {
+                        fprintf(stderr,
+                            "mktsfs: manifest line %u: directory has a source path\n",
+                            lineno);
+                        free(nodes);
+                        fclose(fp);
+                        return -1;
                 }
                 if (!path_valid(p) || find_node(nodes, count, p) >= 0) {
                         fprintf(stderr, "mktsfs: manifest line %u: invalid or duplicate path\n",
@@ -250,6 +342,17 @@ read_manifest(const char *path, struct manifest_node **nodesp,
                 memset(&nodes[count], 0, sizeof(nodes[count]));
                 strcpy(nodes[count].path, p);
                 strcpy(nodes[count].name, name);
+                if (!is_dir && *end != '\0') {
+                        if (strlen(end) >= sizeof(nodes[count].source)) {
+                                fprintf(stderr,
+                                    "mktsfs: manifest line %u: source path too long\n",
+                                    lineno);
+                                free(nodes);
+                                fclose(fp);
+                                return -1;
+                        }
+                        strcpy(nodes[count].source, end);
+                }
                 nodes[count].is_dir = is_dir;
                 nodes[count].parent_node = parent_node;
                 ++count;
@@ -361,11 +464,17 @@ build_file_record(uint64_t rec[TSFS_FILE_WORDS],
         for (i = 0U; i < TSFS_FILE_NAME_WORDS; ++i)
                 rec[TSFS_FILE_NAME0 + i] = pack_sixbit6(node->name,
                     i * 6U, nchars);
-        rec[TSFS_FILE_SIZE_WORDS] = 0;
-        rec[TSFS_FILE_EXTENT_RANGE] = 0;
-        if (node->is_dir)
+        if (node->is_dir) {
+                rec[TSFS_FILE_SIZE_WORDS] = 0;
+                rec[TSFS_FILE_EXTENT_RANGE] = 0;
                 rec[TSFS_FILE_AUX] = ((uint64_t)node->child_start << 18) |
                     node->child_count;
+        } else {
+                rec[TSFS_FILE_SIZE_WORDS] = node->size_words;
+                rec[TSFS_FILE_EXTENT_RANGE] = node->extent_count == 0U ? 0U :
+                    ((uint64_t)node->first_extent << 18) | node->extent_count;
+                rec[TSFS_FILE_AUX] = 0;
+        }
 }
 
 static void
@@ -381,7 +490,10 @@ build_root_record(uint64_t rec[TSFS_FILE_WORDS],
 static void
 build_tdir(uint64_t block[TSFS_BLOCK_WORDS], unsigned int file_count,
     unsigned int file_member, unsigned int file_block,
-    unsigned int file_blocks, uint64_t file_checksum)
+    unsigned int file_blocks, uint64_t file_checksum,
+    unsigned int extent_count, unsigned int extent_member,
+    unsigned int extent_block, unsigned int extent_blocks,
+    uint64_t extent_checksum)
 {
         uint64_t *e;
 
@@ -391,10 +503,10 @@ build_tdir(uint64_t block[TSFS_BLOCK_WORDS], unsigned int file_count,
             ((uint64_t)TSFS_FORMAT_MAJOR << 18) | TSFS_FORMAT_MINOR;
         block[TSFS_TDIR_FLAGS_WORD] = 0;
         block[TSFS_TDIR_FILE_COUNT_WORD] = file_count;
-        block[TSFS_TDIR_EXTENT_COUNT_WORD] = 0;
+        block[TSFS_TDIR_EXTENT_COUNT_WORD] = extent_count;
         block[TSFS_TDIR_PATH_WORDS_WORD] = 0;
+        e = block + TSFS_TDIR_USED_WORDS;
         if (file_count != 0U) {
-                e = block + TSFS_TDIR_USED_WORDS;
                 e[TSFS_TDIRE_ID_FLAGS] = (uint64_t)TSFS_TABLE_FILE << 18;
                 e[TSFS_TDIRE_MEMBER_BLOCK] =
                     ((uint64_t)file_member << 18) | file_block;
@@ -402,6 +514,16 @@ build_tdir(uint64_t block[TSFS_BLOCK_WORDS], unsigned int file_count,
                     ((uint64_t)file_blocks << 18) | TSFS_FILE_WORDS;
                 e[TSFS_TDIRE_RECORD_COUNT] = file_count;
                 e[TSFS_TDIRE_CHECKSUM] = file_checksum;
+                e += TSFS_TDIRE_WORDS;
+        }
+        if (extent_count != 0U) {
+                e[TSFS_TDIRE_ID_FLAGS] = (uint64_t)TSFS_TABLE_EXTENT << 18;
+                e[TSFS_TDIRE_MEMBER_BLOCK] =
+                    ((uint64_t)extent_member << 18) | extent_block;
+                e[TSFS_TDIRE_BLOCKS_RECWORDS] =
+                    ((uint64_t)extent_blocks << 18) | TSFS_EXTENT_WORDS;
+                e[TSFS_TDIRE_RECORD_COUNT] = extent_count;
+                e[TSFS_TDIRE_CHECKSUM] = extent_checksum;
         }
         block[TSFS_TDIR_CHECKSUM_WORD] = tsfs_checksum36(block,
             TSFS_BLOCK_WORDS, TSFS_TDIR_CHECKSUM_WORD);
@@ -444,13 +566,20 @@ main(int argc, char **argv)
         uint64_t descriptor[TSFS_BLOCK_WORDS];
         uint64_t tdir[TSFS_BLOCK_WORDS];
         uint64_t *file_words;
+        uint64_t *extent_words;
         uint64_t file_checksum;
+        uint64_t extent_checksum;
         unsigned int file_count;
         unsigned int file_blocks;
         unsigned int file_block;
+        unsigned int extent_count;
+        unsigned int extent_blocks;
+        unsigned int extent_block;
         unsigned int members;
         unsigned int member;
         unsigned int i;
+        unsigned int next_block[TSFS_MAX_MEMBERS];
+        unsigned int data_member;
         char path[1024];
         size_t image_words;
 
@@ -459,6 +588,9 @@ main(int argc, char **argv)
         manifest = NULL;
         generation = 1;
         members = 0;
+        images = NULL;
+        file_words = NULL;
+        extent_words = NULL;
         for (i = 1U; i < (unsigned int)argc; ++i) {
                 if (strcmp(argv[i], "-n") == 0 && i + 1U < (unsigned int)argc) {
                         char *end;
@@ -500,19 +632,57 @@ main(int argc, char **argv)
                 return 1;
         }
 
+        extent_count = 0U;
+        for (i = 0U; i < node_count; ++i) {
+                struct manifest_node *node;
+
+                node = &nodes[i];
+                if (node->is_dir)
+                        continue;
+                if (source_word_count(node->source, &node->size_words) != 0) {
+                        fprintf(stderr, "mktsfs: invalid source: %s\n",
+                            node->source[0] != '\0' ? node->source : "(empty)");
+                        free(record_to_node);
+                        free(nodes);
+                        return 1;
+                }
+                node->extent_count = (node->size_words + TSFS_RESTART_WORDS - 1U) /
+                    TSFS_RESTART_WORDS;
+        }
+        for (i = 1U; i <= node_count; ++i) {
+                struct manifest_node *node;
+
+                node = &nodes[record_to_node[i - 1U]];
+                if (node->is_dir)
+                        continue;
+                node->first_extent = extent_count;
+                if (node->extent_count > (unsigned int)TSFS_HALF_MASK - extent_count) {
+                        fprintf(stderr, "mktsfs: too many extents\n");
+                        free(record_to_node);
+                        free(nodes);
+                        return 1;
+                }
+                extent_count += node->extent_count;
+        }
+
         file_count = node_count == 0U ? 0U : node_count + 1U;
         file_blocks = file_count == 0U ? 0U :
             (file_count * TSFS_FILE_WORDS + TSFS_BLOCK_WORDS - 1U) /
             TSFS_BLOCK_WORDS;
+        extent_blocks = extent_count == 0U ? 0U :
+            (extent_count * TSFS_EXTENT_WORDS + TSFS_BLOCK_WORDS - 1U) /
+            TSFS_BLOCK_WORDS;
         file_block = TSFS_TDIR_DEFAULT_BLOCK + 1U;
-        if (file_block + file_blocks > TSFS_BLOCK_COUNT) {
+        extent_block = file_block + file_blocks;
+        if (extent_block + extent_blocks > TSFS_BLOCK_COUNT) {
                 fprintf(stderr, "mktsfs: metadata does not fit member 0\n");
                 free(record_to_node);
                 free(nodes);
                 return 1;
         }
+
         file_words = NULL;
-        file_checksum = 0;
+        extent_words = NULL;
         if (file_count != 0U) {
                 size_t words;
                 uint64_t rec[TSFS_FILE_WORDS];
@@ -520,11 +690,8 @@ main(int argc, char **argv)
 
                 words = (size_t)file_blocks * TSFS_BLOCK_WORDS;
                 file_words = (uint64_t *)calloc(words, sizeof(*file_words));
-                if (file_words == NULL) {
-                        free(record_to_node);
-                        free(nodes);
-                        return 1;
-                }
+                if (file_words == NULL)
+                        goto nomem;
                 root_children = 0U;
                 for (i = 0U; i < node_count; ++i)
                         if (nodes[i].parent_node < 0)
@@ -543,19 +710,19 @@ main(int argc, char **argv)
                         memcpy(file_words + (size_t)i * TSFS_FILE_WORDS,
                             rec, sizeof(rec));
                 }
-                file_checksum = tsfs_checksum36(file_words, words, (size_t)-1);
+        }
+        if (extent_count != 0U) {
+                extent_words = (uint64_t *)calloc(
+                    (size_t)extent_blocks * TSFS_BLOCK_WORDS,
+                    sizeof(*extent_words));
+                if (extent_words == NULL)
+                        goto nomem;
         }
 
-        build_tdir(tdir, file_count, 0U, file_block, file_blocks,
-            file_checksum);
         image_words = (size_t)TSFS_BLOCK_COUNT * TSFS_BLOCK_WORDS;
         images = (uint64_t **)calloc(members, sizeof(*images));
-        if (images == NULL) {
-                free(file_words);
-                free(record_to_node);
-                free(nodes);
-                return 1;
-        }
+        if (images == NULL)
+                goto nomem;
         for (member = 0U; member < members; ++member) {
                 images[member] = (uint64_t *)calloc(image_words,
                     sizeof(*images[member]));
@@ -563,12 +730,106 @@ main(int argc, char **argv)
                         while (member != 0U)
                                 free(images[--member]);
                         free(images);
-                        free(file_words);
-                        free(record_to_node);
-                        free(nodes);
-                        return 1;
+                        images = NULL;
+                        goto nomem;
                 }
         }
+
+        next_block[0] = extent_block + extent_blocks;
+        for (member = 1U; member < members; ++member)
+                next_block[member] = TSFS_TDIR_DEFAULT_BLOCK;
+        data_member = 0U;
+
+        for (i = 1U; i < file_count; ++i) {
+                struct manifest_node *node;
+                uint64_t *source;
+                unsigned int e;
+
+                node = &nodes[record_to_node[i - 1U]];
+                if (node->is_dir || node->size_words == 0U)
+                        continue;
+                if (read_source_words(node->source, &source,
+                    node->size_words) != 0) {
+                        fprintf(stderr, "mktsfs: cannot read source: %s\n",
+                            node->source);
+                        goto fail;
+                }
+                for (e = 0U; e < node->extent_count; ++e) {
+                        unsigned int logical_start;
+                        unsigned int logical_words;
+                        unsigned int raw_blocks;
+                        unsigned int blocks;
+                        unsigned int flags;
+                        uint64_t *compressed;
+                        size_t compressed_words;
+                        uint64_t *dst;
+                        uint64_t *rec;
+
+                        logical_start = e * TSFS_RESTART_WORDS;
+                        logical_words = node->size_words - logical_start;
+                        if (logical_words > TSFS_RESTART_WORDS)
+                                logical_words = TSFS_RESTART_WORDS;
+                        raw_blocks = (logical_words + TSFS_BLOCK_WORDS - 1U) /
+                            TSFS_BLOCK_WORDS;
+                        compressed = NULL;
+                        compressed_words = 0U;
+                        if (d6lz_codec_compress(source + logical_start,
+                            logical_words, &compressed, &compressed_words) != 0) {
+                                free(source);
+                                goto fail;
+                        }
+                        flags = TSFS_EXTENT_FLAG_STORED;
+                        blocks = raw_blocks;
+                        if (raw_blocks > 1U && compressed_words + 2U <=
+                            TSFS_BLOCK_WORDS) {
+                                flags = TSFS_EXTENT_FLAG_D6LZ;
+                                blocks = 1U;
+                        }
+                        while (data_member < members &&
+                            next_block[data_member] + blocks > TSFS_BLOCK_COUNT)
+                                ++data_member;
+                        if (data_member >= members) {
+                                fprintf(stderr, "mktsfs: file data does not fit set\n");
+                                free(compressed);
+                                free(source);
+                                goto fail;
+                        }
+                        dst = images[data_member] +
+                            (size_t)next_block[data_member] * TSFS_BLOCK_WORDS;
+                        if (flags == TSFS_EXTENT_FLAG_D6LZ) {
+                                dst[0] = logical_words;
+                                dst[1] = compressed_words;
+                                memcpy(dst + 2U, compressed,
+                                    compressed_words * sizeof(*compressed));
+                        } else {
+                                memcpy(dst, source + logical_start,
+                                    (size_t)logical_words * sizeof(*source));
+                        }
+                        rec = extent_words +
+                            (size_t)(node->first_extent + e) * TSFS_EXTENT_WORDS;
+                        rec[TSFS_EXTENT_FILE_WORD_START] = logical_start;
+                        rec[TSFS_EXTENT_LOCATION] =
+                            ((uint64_t)data_member << 18) |
+                            next_block[data_member];
+                        rec[TSFS_EXTENT_SHAPE] =
+                            ((uint64_t)flags << 18) | blocks;
+                        rec[TSFS_EXTENT_CHECKSUM] = tsfs_checksum36(dst,
+                            (size_t)blocks * TSFS_BLOCK_WORDS, (size_t)-1);
+                        next_block[data_member] += blocks;
+                        free(compressed);
+                }
+                free(source);
+        }
+
+        file_checksum = file_count == 0U ? 0U : tsfs_checksum36(file_words,
+            (size_t)file_blocks * TSFS_BLOCK_WORDS, (size_t)-1);
+        extent_checksum = extent_count == 0U ? 0U :
+            tsfs_checksum36(extent_words,
+            (size_t)extent_blocks * TSFS_BLOCK_WORDS, (size_t)-1);
+        build_tdir(tdir, file_count, 0U, file_block, file_blocks,
+            file_checksum, extent_count, 0U, extent_block, extent_blocks,
+            extent_checksum);
+
         for (member = 0U; member < members; ++member) {
                 build_descriptor(descriptor, &id, generation, members,
                     member, tdir[TSFS_TDIR_CHECKSUM_WORD]);
@@ -585,35 +846,43 @@ main(int argc, char **argv)
                 memcpy(images[0] + (size_t)file_block * TSFS_BLOCK_WORDS,
                     file_words,
                     (size_t)file_blocks * TSFS_BLOCK_WORDS * sizeof(*file_words));
+        if (extent_count != 0U)
+                memcpy(images[0] + (size_t)extent_block * TSFS_BLOCK_WORDS,
+                    extent_words,
+                    (size_t)extent_blocks * TSFS_BLOCK_WORDS *
+                    sizeof(*extent_words));
 
         for (member = 0U; member < members; ++member) {
                 if (strlen(prefix) + 32U >= sizeof(path)) {
                         fprintf(stderr, "mktsfs: output path too long\n");
-                        for (i = 0U; i < members; ++i)
-                                free(images[i]);
-                        free(images);
-                        free(file_words);
-                        free(record_to_node);
-                        free(nodes);
-                        return 1;
+                        goto fail;
                 }
                 sprintf(path, "%s%u.dta", prefix, member);
                 if (tsfs_write_image(path, images[member], image_words) != 0) {
                         perror(path);
-                        for (i = 0U; i < members; ++i)
-                                free(images[i]);
-                        free(images);
-                        free(file_words);
-                        free(record_to_node);
-                        free(nodes);
-                        return 1;
+                        goto fail;
                 }
         }
         for (i = 0U; i < members; ++i)
                 free(images[i]);
         free(images);
+        free(extent_words);
         free(file_words);
         free(record_to_node);
         free(nodes);
         return 0;
+
+nomem:
+        fprintf(stderr, "mktsfs: out of memory\n");
+fail:
+        if (images != NULL) {
+                for (i = 0U; i < members; ++i)
+                        free(images[i]);
+                free(images);
+        }
+        free(extent_words);
+        free(file_words);
+        free(record_to_node);
+        free(nodes);
+        return 1;
 }

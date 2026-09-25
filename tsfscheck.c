@@ -1,6 +1,7 @@
 /* tsfscheck.c - validate a TSFS DECtape set. */
 
 #include "tsfs-format.h"
+#include "d6lz-codec.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -137,20 +138,24 @@ name_record_valid(const uint64_t *rec, int root)
 }
 
 static int
-validate_file_table(const struct table_info *t, const uint64_t *words)
+validate_file_table(const struct table_info *t, const uint64_t *words,
+    unsigned int extent_count)
 {
         unsigned int i;
+        unsigned int next_extent;
 
         if (t->record_words != TSFS_FILE_WORDS || t->record_count == 0U ||
             (size_t)t->record_count * TSFS_FILE_WORDS >
             (size_t)t->blocks * TSFS_BLOCK_WORDS)
                 return -1;
+        next_extent = 0U;
         for (i = 0U; i < t->record_count; ++i) {
                 const uint64_t *r;
                 unsigned int parent;
                 unsigned int flags;
                 unsigned int first;
                 unsigned int count;
+                unsigned int size;
 
                 r = words + (size_t)i * TSFS_FILE_WORDS;
                 parent = (unsigned int)((r[TSFS_FILE_PARENT_FLAGS] >> 18) &
@@ -168,8 +173,8 @@ validate_file_table(const struct table_info *t, const uint64_t *words)
                         return -1;
                 }
                 if (flags == TSFS_FILE_FLAG_DIR) {
-                        if (r[TSFS_FILE_SIZE_WORDS] != 0 ||
-                            r[TSFS_FILE_EXTENT_RANGE] != 0)
+                        if (r[TSFS_FILE_SIZE_WORDS] != 0U ||
+                            r[TSFS_FILE_EXTENT_RANGE] != 0U)
                                 return -1;
                         first = (unsigned int)((r[TSFS_FILE_AUX] >> 18) &
                             TSFS_HALF_MASK);
@@ -179,10 +184,130 @@ validate_file_table(const struct table_info *t, const uint64_t *words)
                             first + count > t->record_count)))
                                 return -1;
                 } else {
-                        if (r[TSFS_FILE_SIZE_WORDS] != 0 ||
-                            r[TSFS_FILE_EXTENT_RANGE] != 0 ||
-                            r[TSFS_FILE_AUX] != 0)
+                        if (r[TSFS_FILE_AUX] != 0U ||
+                            r[TSFS_FILE_SIZE_WORDS] > TSFS_HALF_MASK)
                                 return -1;
+                        size = (unsigned int)r[TSFS_FILE_SIZE_WORDS];
+                        first = (unsigned int)((r[TSFS_FILE_EXTENT_RANGE] >> 18) &
+                            TSFS_HALF_MASK);
+                        count = (unsigned int)(r[TSFS_FILE_EXTENT_RANGE] &
+                            TSFS_HALF_MASK);
+                        if (size == 0U) {
+                                if (first != 0U || count != 0U)
+                                        return -1;
+                        } else {
+                                if (count != (size + TSFS_RESTART_WORDS - 1U) /
+                                    TSFS_RESTART_WORDS || first != next_extent ||
+                                    first + count > extent_count)
+                                        return -1;
+                                next_extent += count;
+                        }
+                }
+        }
+        return next_extent == extent_count ? 0 : -1;
+}
+
+static int
+validate_extent_data(const struct table_info *t, const uint64_t *extents,
+    const uint64_t *files, const struct table_info *file_table,
+    const char *member_path[TSFS_MAX_MEMBERS], unsigned int members,
+    unsigned char used[TSFS_MAX_MEMBERS][TSFS_BLOCK_COUNT])
+{
+        unsigned int fi;
+
+        if (t->record_words != TSFS_EXTENT_WORDS ||
+            t->record_count == 0U ||
+            (size_t)t->record_count * TSFS_EXTENT_WORDS >
+            (size_t)t->blocks * TSFS_BLOCK_WORDS)
+                return -1;
+        for (fi = 0U; fi < file_table->record_count; ++fi) {
+                const uint64_t *fr;
+                unsigned int flags;
+                unsigned int size;
+                unsigned int first;
+                unsigned int count;
+                unsigned int ei;
+
+                fr = files + (size_t)fi * TSFS_FILE_WORDS;
+                flags = (unsigned int)(fr[TSFS_FILE_PARENT_FLAGS] &
+                    TSFS_HALF_MASK);
+                if (flags != TSFS_FILE_FLAG_REG)
+                        continue;
+                size = (unsigned int)fr[TSFS_FILE_SIZE_WORDS];
+                first = (unsigned int)((fr[TSFS_FILE_EXTENT_RANGE] >> 18) &
+                    TSFS_HALF_MASK);
+                count = (unsigned int)(fr[TSFS_FILE_EXTENT_RANGE] &
+                    TSFS_HALF_MASK);
+                for (ei = 0U; ei < count; ++ei) {
+                        const uint64_t *er;
+                        unsigned int logical_start;
+                        unsigned int logical_words;
+                        unsigned int member;
+                        unsigned int block;
+                        unsigned int eflags;
+                        unsigned int blocks;
+                        uint64_t media[2U * TSFS_BLOCK_WORDS];
+                        unsigned int bi;
+
+                        er = extents + (size_t)(first + ei) * TSFS_EXTENT_WORDS;
+                        logical_start = ei * TSFS_RESTART_WORDS;
+                        logical_words = size - logical_start;
+                        if (logical_words > TSFS_RESTART_WORDS)
+                                logical_words = TSFS_RESTART_WORDS;
+                        if (er[TSFS_EXTENT_FILE_WORD_START] != logical_start)
+                                return -1;
+                        member = (unsigned int)((er[TSFS_EXTENT_LOCATION] >> 18) &
+                            TSFS_HALF_MASK);
+                        block = (unsigned int)(er[TSFS_EXTENT_LOCATION] &
+                            TSFS_HALF_MASK);
+                        eflags = (unsigned int)((er[TSFS_EXTENT_SHAPE] >> 18) &
+                            TSFS_HALF_MASK);
+                        blocks = (unsigned int)(er[TSFS_EXTENT_SHAPE] &
+                            TSFS_HALF_MASK);
+                        if (member >= members || member_path[member] == NULL ||
+                            (eflags & ~TSFS_EXTENT_FLAG_MASK) != 0U ||
+                            blocks == 0U || blocks > 2U || block < 3U ||
+                            block + blocks > TSFS_BLOCK_COUNT)
+                                return -1;
+                        if (eflags == TSFS_EXTENT_FLAG_STORED) {
+                                if (blocks != (logical_words + TSFS_BLOCK_WORDS - 1U) /
+                                    TSFS_BLOCK_WORDS)
+                                        return -1;
+                        } else if (blocks != 1U || logical_words <= TSFS_BLOCK_WORDS) {
+                                return -1;
+                        }
+                        for (bi = 0U; bi < blocks; ++bi) {
+                                if (used[member][block + bi] != 0U ||
+                                    tsfs_read_image_block(member_path[member],
+                                    block + bi, media +
+                                    (size_t)bi * TSFS_BLOCK_WORDS) != 0)
+                                        return -1;
+                                used[member][block + bi] = 1U;
+                        }
+                        if (tsfs_checksum36(media,
+                            (size_t)blocks * TSFS_BLOCK_WORDS, (size_t)-1) !=
+                            er[TSFS_EXTENT_CHECKSUM])
+                                return -1;
+                        if (eflags == TSFS_EXTENT_FLAG_D6LZ) {
+                                unsigned int decoded;
+                                unsigned int compressed;
+                                uint64_t out[TSFS_RESTART_WORDS];
+
+                                decoded = (unsigned int)media[0];
+                                compressed = (unsigned int)media[1];
+                                if (decoded != logical_words || compressed == 0U ||
+                                    compressed > TSFS_BLOCK_WORDS - 2U ||
+                                    d6lz_codec_decompress(media + 2U, compressed,
+                                    out, decoded) != 0)
+                                        return -1;
+                        } else {
+                                unsigned int wi;
+
+                                for (wi = logical_words;
+                                    wi < blocks * TSFS_BLOCK_WORDS; ++wi)
+                                        if (media[wi] != 0U)
+                                                return -1;
+                        }
                 }
         }
         return 0;
@@ -268,53 +393,139 @@ main(int argc, char **argv)
                 return 1;
         }
 
-        memset(&file_table, 0, sizeof(file_table));
-        if (tdir[TSFS_TDIR_FILE_COUNT_WORD] == 0) {
-                if (tdir[TSFS_TDIR_EXTENT_COUNT_WORD] != 0) {
-                        fprintf(stderr, "tsfscheck: extents without files\n");
-                        return 1;
-                }
-        } else {
+        {
+                struct table_info extent_table;
+                uint64_t *extent_words;
+                unsigned char used[TSFS_MAX_MEMBERS][TSFS_BLOCK_COUNT];
                 const uint64_t *e;
                 uint64_t shape;
+                unsigned int m;
+                unsigned int b;
 
-                e = tdir + TSFS_TDIR_USED_WORDS;
-                if (((e[TSFS_TDIRE_ID_FLAGS] >> 18) & TSFS_HALF_MASK) !=
-                    TSFS_TABLE_FILE ||
-                    (e[TSFS_TDIRE_ID_FLAGS] & TSFS_HALF_MASK) != 0) {
-                        fprintf(stderr, "tsfscheck: missing file table\n");
-                        return 1;
+                memset(&file_table, 0, sizeof(file_table));
+                memset(&extent_table, 0, sizeof(extent_table));
+                memset(used, 0, sizeof(used));
+                for (m = 0U; m < info[0].count; ++m)
+                        for (b = 0U; b < 3U; ++b)
+                                used[m][b] = 1U;
+                for (b = 0U; b < info[0].tdir_blocks; ++b)
+                        used[info[0].tdir_member][info[0].tdir_block + b] = 1U;
+
+                if (tdir[TSFS_TDIR_FILE_COUNT_WORD] == 0U) {
+                        if (tdir[TSFS_TDIR_EXTENT_COUNT_WORD] != 0U) {
+                                fprintf(stderr, "tsfscheck: extents without files\n");
+                                return 1;
+                        }
+                } else {
+                        e = tdir + TSFS_TDIR_USED_WORDS;
+                        if (((e[TSFS_TDIRE_ID_FLAGS] >> 18) & TSFS_HALF_MASK) !=
+                            TSFS_TABLE_FILE ||
+                            (e[TSFS_TDIRE_ID_FLAGS] & TSFS_HALF_MASK) != 0U) {
+                                fprintf(stderr, "tsfscheck: missing file table\n");
+                                return 1;
+                        }
+                        file_table.id = TSFS_TABLE_FILE;
+                        file_table.member = (unsigned int)
+                            ((e[TSFS_TDIRE_MEMBER_BLOCK] >> 18) & TSFS_HALF_MASK);
+                        file_table.block = (unsigned int)
+                            (e[TSFS_TDIRE_MEMBER_BLOCK] & TSFS_HALF_MASK);
+                        shape = e[TSFS_TDIRE_BLOCKS_RECWORDS];
+                        file_table.blocks = (unsigned int)
+                            ((shape >> 18) & TSFS_HALF_MASK);
+                        file_table.record_words = (unsigned int)
+                            (shape & TSFS_HALF_MASK);
+                        file_table.record_count =
+                            (unsigned int)e[TSFS_TDIRE_RECORD_COUNT];
+                        file_table.checksum = e[TSFS_TDIRE_CHECKSUM];
+                        if (file_table.member >= info[0].count ||
+                            file_table.blocks == 0U || file_table.block < 3U ||
+                            file_table.block + file_table.blocks > TSFS_BLOCK_COUNT ||
+                            file_table.record_count !=
+                            (unsigned int)tdir[TSFS_TDIR_FILE_COUNT_WORD] ||
+                            member_path[file_table.member] == NULL ||
+                            read_table(member_path[file_table.member], &file_table,
+                            &file_words) != 0) {
+                                fprintf(stderr, "tsfscheck: invalid file table\n");
+                                return 1;
+                        }
+                        for (b = 0U; b < file_table.blocks; ++b) {
+                                if (used[file_table.member][file_table.block + b]) {
+                                        fprintf(stderr, "tsfscheck: overlapping file table\n");
+                                        free(file_words);
+                                        return 1;
+                                }
+                                used[file_table.member][file_table.block + b] = 1U;
+                        }
+
+                        if (tdir[TSFS_TDIR_EXTENT_COUNT_WORD] != 0U) {
+                                e += TSFS_TDIRE_WORDS;
+                                if (((e[TSFS_TDIRE_ID_FLAGS] >> 18) &
+                                    TSFS_HALF_MASK) != TSFS_TABLE_EXTENT ||
+                                    (e[TSFS_TDIRE_ID_FLAGS] & TSFS_HALF_MASK) != 0U) {
+                                        fprintf(stderr, "tsfscheck: missing extent table\n");
+                                        free(file_words);
+                                        return 1;
+                                }
+                                extent_table.id = TSFS_TABLE_EXTENT;
+                                extent_table.member = (unsigned int)
+                                    ((e[TSFS_TDIRE_MEMBER_BLOCK] >> 18) &
+                                    TSFS_HALF_MASK);
+                                extent_table.block = (unsigned int)
+                                    (e[TSFS_TDIRE_MEMBER_BLOCK] & TSFS_HALF_MASK);
+                                shape = e[TSFS_TDIRE_BLOCKS_RECWORDS];
+                                extent_table.blocks = (unsigned int)
+                                    ((shape >> 18) & TSFS_HALF_MASK);
+                                extent_table.record_words = (unsigned int)
+                                    (shape & TSFS_HALF_MASK);
+                                extent_table.record_count =
+                                    (unsigned int)e[TSFS_TDIRE_RECORD_COUNT];
+                                extent_table.checksum = e[TSFS_TDIRE_CHECKSUM];
+                                if (extent_table.member >= info[0].count ||
+                                    extent_table.blocks == 0U ||
+                                    extent_table.block < 3U ||
+                                    extent_table.block + extent_table.blocks >
+                                    TSFS_BLOCK_COUNT || extent_table.record_count !=
+                                    (unsigned int)tdir[TSFS_TDIR_EXTENT_COUNT_WORD] ||
+                                    member_path[extent_table.member] == NULL ||
+                                    read_table(member_path[extent_table.member],
+                                    &extent_table, &extent_words) != 0) {
+                                        fprintf(stderr, "tsfscheck: invalid extent table\n");
+                                        free(file_words);
+                                        return 1;
+                                }
+                                for (b = 0U; b < extent_table.blocks; ++b) {
+                                        if (used[extent_table.member]
+                                            [extent_table.block + b]) {
+                                                fprintf(stderr,
+                                                    "tsfscheck: overlapping extent table\n");
+                                                free(extent_words);
+                                                free(file_words);
+                                                return 1;
+                                        }
+                                        used[extent_table.member]
+                                            [extent_table.block + b] = 1U;
+                                }
+                        } else {
+                                extent_words = NULL;
+                        }
+
+                        if (validate_file_table(&file_table, file_words,
+                            (unsigned int)tdir[TSFS_TDIR_EXTENT_COUNT_WORD]) != 0 ||
+                            (extent_words != NULL && validate_extent_data(
+                            &extent_table, extent_words, file_words, &file_table,
+                            member_path, info[0].count, used) != 0)) {
+                                fprintf(stderr, "tsfscheck: invalid file/extent data\n");
+                                free(extent_words);
+                                free(file_words);
+                                return 1;
+                        }
+                        free(extent_words);
+                        free(file_words);
                 }
-                file_table.id = TSFS_TABLE_FILE;
-                file_table.member = (unsigned int)((e[TSFS_TDIRE_MEMBER_BLOCK] >>
-                    18) & TSFS_HALF_MASK);
-                file_table.block = (unsigned int)(e[TSFS_TDIRE_MEMBER_BLOCK] &
-                    TSFS_HALF_MASK);
-                shape = e[TSFS_TDIRE_BLOCKS_RECWORDS];
-                file_table.blocks = (unsigned int)((shape >> 18) & TSFS_HALF_MASK);
-                file_table.record_words = (unsigned int)(shape & TSFS_HALF_MASK);
-                file_table.record_count = (unsigned int)e[TSFS_TDIRE_RECORD_COUNT];
-                file_table.checksum = e[TSFS_TDIRE_CHECKSUM];
-                if (file_table.member >= info[0].count || file_table.blocks == 0U ||
-                    file_table.block < 3U ||
-                    file_table.block + file_table.blocks > TSFS_BLOCK_COUNT ||
-                    file_table.record_count !=
-                    (unsigned int)tdir[TSFS_TDIR_FILE_COUNT_WORD] ||
-                    member_path[file_table.member] == NULL ||
-                    read_table(member_path[file_table.member], &file_table,
-                    &file_words) != 0 ||
-                    validate_file_table(&file_table, file_words) != 0) {
-                        fprintf(stderr, "tsfscheck: invalid file table\n");
-                        return 1;
-                }
-                free(file_words);
         }
-        if (tdir[TSFS_TDIR_EXTENT_COUNT_WORD] != 0) {
-                fprintf(stderr, "tsfscheck: extent-bearing images not supported by this V1 builder yet\n");
-                return 1;
-        }
-        printf("TSFS OK members=%u generation=%lo files=%lo\n",
+        printf("TSFS OK members=%u generation=%lo files=%lo extents=%lo\n",
             info[0].count, (unsigned long)info[0].generation,
-            (unsigned long)tdir[TSFS_TDIR_FILE_COUNT_WORD]);
+            (unsigned long)tdir[TSFS_TDIR_FILE_COUNT_WORD],
+            (unsigned long)tdir[TSFS_TDIR_EXTENT_COUNT_WORD]);
         return 0;
 }
