@@ -467,8 +467,8 @@ build_file_record(uint64_t rec[TSFS_FILE_WORDS],
         if (node->is_dir) {
                 rec[TSFS_FILE_SIZE_WORDS] = 0;
                 rec[TSFS_FILE_EXTENT_RANGE] = 0;
-                rec[TSFS_FILE_AUX] = ((uint64_t)node->child_start << 18) |
-                    node->child_count;
+                rec[TSFS_FILE_AUX] = node->child_count == 0U ? 0U :
+                    ((uint64_t)node->child_start << 18) | node->child_count;
         } else {
                 rec[TSFS_FILE_SIZE_WORDS] = node->size_words;
                 rec[TSFS_FILE_EXTENT_RANGE] = node->extent_count == 0U ? 0U :
