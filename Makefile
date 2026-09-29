@@ -5,7 +5,7 @@ INCLUDEDIR = ${PDP10_PREFIX}/include
 CC = cc
 CFLAGS = -O2
 
-TOOLS = d6lz mkdsk mkd6fs d6fsck packfs d6bad logstore d6swap mkdt mktsfs tsfscheck mkstream mktap words2pt dlink darc p10run pdp10-objdump p10fold mkinitfs0 mkbootbanner
+TOOLS = d6lz mkdsk mkd6fs d6fsck packfs d6bad logstore d6swap mkdt mktsfs tsfscheck mkstream mktap words2pt dlink darc p10run pdp10-objdump p10fold p10super mkinitfs0 mkbootbanner
 ALIASES = pdp10-dec-none-darc pdp10-dec-none-objdump mkinitfs
 SIMH_INIS = simh/pdp6.ini simh/pdp10-ka.ini simh/pdp10-ki.ini simh/pdp10-kl.ini simh/pdp10-ks.ini
 SIMH_NAMES = pdp6.ini pdp10-ka.ini pdp10-ki.ini pdp10-kl.ini pdp10-ks.ini
@@ -69,6 +69,9 @@ pdp10-objdump: pdp10-objdump.c dobj.c dobj.h
 
 p10fold: p10fold.c dobj.c dobj.h
 	${CC} ${CFLAGS} -std=c99 -Wall -Wextra -Werror -o $@ p10fold.c dobj.c
+
+p10super: p10super.c dobj.c dobj.h
+	${CC} ${CFLAGS} -std=c99 -Wall -Wextra -Werror -o $@ p10super.c dobj.c
 
 mkinitfs0: mkinitfs0.c
 	${CC} ${CFLAGS} -o $@ mkinitfs0.c

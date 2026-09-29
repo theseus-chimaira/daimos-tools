@@ -2,6 +2,20 @@
 
 PDP10 TOOLS IS THE HOST SIDE SUPPORT TOOL COLLECTION FOR THE PDP-6 AND PDP-10 TOOLCHAIN AND FOR DAIMOS IMAGE AND STORAGE FORMATS.
 
+## p10super
+
+`p10super` is a host-side PDP-10 scheduling-similarity analyzer used to
+discover source-layout changes which may expose additional exact `p10fold`
+opportunities. It models a conservative subset of PDP-10 register, memory,
+half-word, compare and test semantics, and searches legal instruction
+schedules within bounded straight-line regions.
+
+The tool is advisory: `SCHEDULE` results require no AC renaming, while
+`RENAME` results also require a consistent AC renaming and therefore need
+liveness/calling-convention proof before source changes are attempted.
+Neither class is folded directly; changed source must still assemble and pass
+the exact relocation-aware `p10fold` checks.
+
 THE DAS ASSEMBLER AND THE TEST SUITES ARE MAINTAINED IN SEPARATE PROJECTS.
 
 ## BUILD
