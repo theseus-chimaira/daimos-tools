@@ -295,6 +295,18 @@ has_text_entry(const struct dobj_object *o, unsigned long off)
 }
 
 static int
+has_named_text_entry(const struct dobj_object *o, unsigned long off)
+{
+        unsigned long i;
+        for (i = 0; i < o->symbol_count; i++)
+                if (o->symbols[i].kind == DOBJ_SYM_DEF &&
+                    o->symbols[i].sec == DOBJ_SEC_TEXT &&
+                    o->symbols[i].value.rh == off)
+                        return 1;
+        return 0;
+}
+
+static int
 cai0_jrst_replacement(const struct dobj_object *o, unsigned long off,
     unsigned int *replacement)
 {
@@ -609,6 +621,56 @@ block_shape_equal(const struct dobj_object *ao, const struct block *a,
                 }
         }
         return 1;
+}
+
+struct cfg_seen {
+        const struct block *a;
+        const struct block *b;
+};
+
+static unsigned long
+cfg_shape_score_rec(const struct dobj_object *ao, const struct block *a,
+    const struct block *ab, unsigned long na,
+    const struct dobj_object *bo, const struct block *b,
+    const struct block *bb, unsigned long nb, unsigned int depth,
+    struct cfg_seen *seen, unsigned int nseen, unsigned int *blocks)
+{
+        unsigned long score, i;
+
+        if (depth == 0 || same_block_occurrence(ao, a, bo, b) ||
+            !block_shape_equal(ao, a, bo, b) || a->nsucc != b->nsucc)
+                return 0;
+        for (i = 0; i < nseen; i++)
+                if (seen[i].a == a && seen[i].b == b)
+                        return 0;
+        if (nseen >= 8)
+                return 0;
+        seen[nseen].a = a;
+        seen[nseen].b = b;
+        nseen++;
+        score = a->end - a->start;
+        (*blocks)++;
+        for (i = 0; i < a->nsucc; i++) {
+                const struct block *as = block_at(ab, na, a->succ[i]);
+                const struct block *bs = block_at(bb, nb, b->succ[i]);
+                if (as == NULL || bs == NULL)
+                        continue;
+                score += cfg_shape_score_rec(ao, as, ab, na,
+                    bo, bs, bb, nb, depth - 1, seen, nseen, blocks);
+        }
+        return score;
+}
+
+static unsigned long
+cfg_shape_score(const struct dobj_object *ao, const struct block *a,
+    const struct block *ab, unsigned long na,
+    const struct dobj_object *bo, const struct block *b,
+    const struct block *bb, unsigned long nb, unsigned int *blocks)
+{
+        struct cfg_seen seen[8];
+        *blocks = 0;
+        return cfg_shape_score_rec(ao, a, ab, na, bo, b, bb, nb,
+            4, seen, 0, blocks);
 }
 
 static int
@@ -1216,6 +1278,62 @@ main(int argc, char **argv)
                                                     in[ai].name, ab[x].start,
                                                     in[bi].name, bb[y].start,
                                                     gts, gfs, gscore);
+                                        if (!same_block_occurrence(
+                                            &in[ai].obj, &ab[x],
+                                            &in[bi].obj, &bb[y]) &&
+                                            block_shape_equal(
+                                            &in[ai].obj, &ab[x],
+                                            &in[bi].obj, &bb[y])) {
+                                                unsigned long blen =
+                                                    ab[x].end - ab[x].start;
+                                                unsigned long exact =
+                                                    common_block_suffix(
+                                                    &in[ai].obj, &ab[x],
+                                                    &in[bi].obj, &bb[y]);
+                                                unsigned int sblocks = 0;
+                                                unsigned long sscore =
+                                                    cfg_shape_score(
+                                                    &in[ai].obj, &ab[x],
+                                                    ab, na, &in[bi].obj,
+                                                    &bb[y], bb, nb,
+                                                    &sblocks);
+                                                if (sblocks >= 2 &&
+                                                    sscore >= 8 &&
+                                                    sscore > blen)
+                                                        fprintf(stderr,
+                                                            "CFG-SUBGRAPH "
+                                                            "%s+%06lo <=> "
+                                                            "%s+%06lo : "
+                                                            "%u BLOCKS; "
+                                                            "%lu WORDS\n",
+                                                            in[ai].name,
+                                                            ab[x].start,
+                                                            in[bi].name,
+                                                            bb[y].start,
+                                                            sblocks, sscore);
+                                                if (blen >= 3 &&
+                                                    exact != blen)
+                                                        fprintf(stderr,
+                                                            "CFG-SHAPE-%s "
+                                                            "%s+%06lo <=> "
+                                                            "%s+%06lo : "
+                                                            "%lu WORDS; "
+                                                            "%u/%u SUCC\n",
+                                                            (has_named_text_entry(
+                                                            &in[ai].obj,
+                                                            ab[x].start) ||
+                                                            has_named_text_entry(
+                                                            &in[bi].obj,
+                                                            bb[y].start)) ?
+                                                            "NAMED" : "INTERNAL",
+                                                            in[ai].name,
+                                                            ab[x].start,
+                                                            in[bi].name,
+                                                            bb[y].start,
+                                                            blen,
+                                                            ab[x].nsucc,
+                                                            bb[y].nsucc);
+                                        }
                                         if (inverted_jump_blocks(
                                             &in[ai].obj, &ab[x], ab, na,
                                             &in[bi].obj, &bb[y], bb, nb))
