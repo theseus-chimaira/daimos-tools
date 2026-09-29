@@ -15,6 +15,7 @@
 
 #define MAX_REGION 8UL
 #define F_FIXED 1U
+#define MEM_UNKNOWN (-1)
 
 struct block {
         unsigned long start;
@@ -917,7 +918,15 @@ decode_safe(const struct dobj_object *o, unsigned long off, struct insn *d)
         case 0201: case 0205: case 0211: case 0215: /* MOVEI family */
         case 0400: case 0401:                         /* SETZ/SETZI */
         case 0474: case 0475:                         /* SETO/SETOI */
-        case 0501: case 0541: case 0551: case 0561: /* halfword I */
+                d->writes = bit;
+                return 1;
+        /*
+         * Plain halfword loads preserve the other half of the destination
+         * AC, so both the memory and the old AC value are inputs.  The
+         * immediate forms likewise preserve half of the AC.
+         */
+        case 0501: case 0505: case 0541: case 0545: /* HLLI/HRLI/HRRI/HLRI */
+                d->reads = bit;
                 d->writes = bit;
                 return 1;
         case 0271: case 0275: /* ADDI/SUBI */
@@ -935,11 +944,19 @@ decode_safe(const struct dobj_object *o, unsigned long off, struct insn *d)
                 d->reads = bit;
                 d->writes = bit;
                 return 1;
+        case 0135: /* LDB: byte-pointer target is dynamic, pointer unchanged */
+                d->mem_read = 1;
+                d->mem_kind = MEM_UNKNOWN;
+                d->writes = bit;
+                return 1;
+        case 0137: /* DPB: byte-pointer target is dynamic, pointer unchanged */
+                d->mem_write = 1;
+                d->mem_kind = MEM_UNKNOWN;
+                d->reads = bit;
+                return 1;
         case 0200: case 0204: case 0210: case 0214: /* MOVE/MOVS/N/M */
         case 0270: case 0274:                         /* ADD/SUB */
         case 0404: case 0430: case 0434: case 0444: /* AND/XOR/IOR/EQV */
-        case 0500: case 0540: case 0550: case 0560: /* halfword reads */
-        case 0510: case 0520: case 0530: case 0570: /* halfword Z reads */
                 if (!memory_id(o, off, &d->mem_kind, &d->mem_id))
                         return 0;
                 d->mem_read = 1;
@@ -949,8 +966,35 @@ decode_safe(const struct dobj_object *o, unsigned long off, struct insn *d)
                         d->reads = bit;
                 d->writes = bit;
                 return 1;
+        case 0500: case 0504: case 0540: case 0544: /* HLL/HRL/HRR/HLR */
+                if (!memory_id(o, off, &d->mem_kind, &d->mem_id))
+                        return 0;
+                d->mem_read = 1;
+                d->reads = bit;
+                d->writes = bit;
+                return 1;
+        /*
+         * Z/O/E halfword loads determine the whole AC: the untouched half is
+         * zero-filled, one-filled, or sign-extended.  They do not depend on
+         * the old AC value.
+         */
+        case 0510: case 0514: case 0520: case 0524:
+        case 0530: case 0534:
+        case 0550: case 0554: case 0560: case 0564:
+        case 0570: case 0574:
+                if (!memory_id(o, off, &d->mem_kind, &d->mem_id))
+                        return 0;
+                d->mem_read = 1;
+                d->writes = bit;
+                return 1;
+        case 0511: case 0515: case 0521: case 0525:
+        case 0531: case 0535:
+        case 0551: case 0555: case 0561: case 0565:
+        case 0571: case 0575:
+                d->writes = bit;
+                return 1;
         case 0202: case 0206: case 0212: case 0216: /* MOVE*M */
-        case 0502: case 0542: case 0552: case 0562: /* halfword stores */
+        case 0502: case 0506: case 0542: case 0546: /* HLLM/HRLM/HRRM/HLRM */
                 if (!memory_id(o, off, &d->mem_kind, &d->mem_id))
                         return 0;
                 d->mem_write = 1;
@@ -1057,6 +1101,8 @@ independent(const struct insn *a, const struct insn *b)
         if ((!a->mem_read && !a->mem_write) ||
             (!b->mem_read && !b->mem_write))
                 return 1;
+        if (a->mem_kind == MEM_UNKNOWN || b->mem_kind == MEM_UNKNOWN)
+                return 0;
         same_mem = a->mem_kind == b->mem_kind && a->mem_id == b->mem_id;
         if (!same_mem)
                 return 1;
