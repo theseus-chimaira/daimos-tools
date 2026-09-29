@@ -15,6 +15,7 @@ struct input {
 struct occurrence {
         int input;
         unsigned long off;
+        int removable;
 };
 
 struct group {
@@ -210,16 +211,20 @@ same_occurrence(const struct occurrence *a, const struct occurrence *b)
 }
 
 static int
-group_add(struct group *g, int input, unsigned long off)
+group_add(struct group *g, int input, unsigned long off, int removable)
 {
         struct occurrence o;
         unsigned long i;
 
         o.input = input;
         o.off = off;
+        o.removable = removable;
         for (i = 0UL; i < g->count; i++)
-                if (same_occurrence(&g->occ[i], &o))
+                if (same_occurrence(&g->occ[i], &o)) {
+                        if (removable)
+                                g->occ[i].removable = 1;
                         return 0;
+                }
         if (g->count == g->cap) {
                 unsigned long cap = g->cap ? g->cap * 2UL : 4UL;
                 struct occurrence *p = (struct occurrence *)realloc(g->occ,
@@ -249,7 +254,7 @@ group_equivalent(const struct group *g, const struct input *inputs,
 static int
 add_zero_group(struct group **groupsp, unsigned long *countp,
     unsigned long *capp, const struct input *inputs, int ai, unsigned long ao,
-    int bi, unsigned long bo, unsigned long words)
+    int ar, int bi, unsigned long bo, int br, unsigned long words)
 {
         struct group *groups = *groupsp;
         unsigned long i;
@@ -258,8 +263,8 @@ add_zero_group(struct group **groupsp, unsigned long *countp,
                 if (!group_equivalent(&groups[i], inputs, ai, ao, bi, bo,
                     words))
                         continue;
-                if (group_add(&groups[i], ai, ao) != 0 ||
-                    group_add(&groups[i], bi, bo) != 0)
+                if (group_add(&groups[i], ai, ao, ar) != 0 ||
+                    group_add(&groups[i], bi, bo, br) != 0)
                         return -1;
                 return 0;
         }
@@ -276,8 +281,8 @@ add_zero_group(struct group **groupsp, unsigned long *countp,
         }
         memset(&groups[*countp], 0, sizeof(groups[*countp]));
         groups[*countp].words = words;
-        if (group_add(&groups[*countp], ai, ao) != 0 ||
-            group_add(&groups[*countp], bi, bo) != 0)
+        if (group_add(&groups[*countp], ai, ao, ar) != 0 ||
+            group_add(&groups[*countp], bi, bo, br) != 0)
                 return -1;
         (*countp)++;
         return 0;
@@ -288,8 +293,14 @@ group_cmp(const void *av, const void *bv)
 {
         const struct group *a = (const struct group *)av;
         const struct group *b = (const struct group *)bv;
-        unsigned long asave = a->words * (a->count - 1UL);
-        unsigned long bsave = b->words * (b->count - 1UL);
+        unsigned long i, ar = 0UL, br = 0UL;
+        unsigned long asave, bsave;
+        for (i = 0UL; i < a->count; i++) ar += a->occ[i].removable != 0;
+        for (i = 0UL; i < b->count; i++) br += b->occ[i].removable != 0;
+        if (ar >= a->count) ar = a->count - 1UL;
+        if (br >= b->count) br = b->count - 1UL;
+        asave = a->words * ar;
+        bsave = b->words * br;
 
         if (asave < bsave)
                 return 1;
@@ -444,12 +455,16 @@ main(int argc, char **argv)
                                             next_symbol(&inputs[ai], ao) == ao + n &&
                                             next_symbol(&inputs[bi], bo) == bo + n;
                                         int zero_block;
+                                        int ar;
+                                        int br;
                                         const char *cost;
                                         unsigned long pair_net;
 
-                                        zero_block =
-                                            isolated_block(&inputs[ai], ao, n) &&
+                                        ar = whole ||
+                                            isolated_block(&inputs[ai], ao, n);
+                                        br = whole ||
                                             isolated_block(&inputs[bi], bo, n);
+                                        zero_block = ar || br;
                                         cost = (whole || zero_block) ?
                                             "ZERO" : "ONE_JRST";
                                         pair_net = (whole || zero_block) ?
@@ -472,8 +487,8 @@ main(int argc, char **argv)
                                                 zero_cost_candidates++;
                                                 if (add_zero_group(&groups,
                                                     &group_count, &group_cap,
-                                                    inputs, ai, ao, bi, bo,
-                                                    n) != 0) {
+                                                    inputs, ai, ao, ar,
+                                                    bi, bo, br, n) != 0) {
                                                         fprintf(stderr,
                                                             "p10fold: out of memory\n");
                                                         return 1;
@@ -515,6 +530,8 @@ main(int argc, char **argv)
                         struct group *g = &groups[gi];
                         unsigned long oi;
                         unsigned long usable = 0UL;
+                        unsigned long removable = 0UL;
+                        unsigned long group_saved;
                         int blocked = 0;
 
                         for (oi = 0UL; oi < g->count; oi++) {
@@ -527,28 +544,37 @@ main(int argc, char **argv)
                                                 occ_blocked = 1;
                                 if (occ_blocked)
                                         blocked = 1;
-                                else
+                                else {
                                         usable++;
+                                        if (o->removable)
+                                                removable++;
+                                }
                         }
                         if (blocked || usable < 2UL)
                                 continue;
+                        if (removable >= usable)
+                                removable = usable - 1UL;
+                        if (removable == 0UL)
+                                continue;
+                        group_saved = g->words * removable;
                         printf("GROUP %lu: %lu WORDS x %lu COPIES; SAVE %lu\n",
                             accepted + 1UL, g->words, g->count,
-                            g->words * (g->count - 1UL));
+                            group_saved);
                         for (oi = 0UL; oi < g->count; oi++) {
                                 unsigned long j;
                                 struct occurrence *o = &g->occ[oi];
                                 const char *s = symbol_at(&inputs[o->input],
                                     o->off);
 
-                                printf("  %s+%06lo%s%s%s\n",
+                                printf("  %s %s+%06lo%s%s%s\n",
+                                    o->removable ? "DONOR " : "ANCHOR",
                                     inputs[o->input].name, o->off,
                                     s ? " (" : "", s ? s : "",
                                     s ? ")" : "");
                                 for (j = 0UL; j < g->words; j++)
                                         used[o->input][o->off + j] = 1U;
                         }
-                        saved += g->words * (g->count - 1UL);
+                        saved += group_saved;
                         accepted++;
                 }
                 printf("ZERO-COST NON-OVERLAPPING TOTAL: %lu GROUPS; "

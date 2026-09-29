@@ -89,6 +89,13 @@ is_control_word(struct dobj_word w)
         return is_skip_opcode(op);
 }
 
+static int
+is_invertible_jump(struct dobj_word w)
+{
+        unsigned int op = (unsigned int)((w.lh >> 9) & 0777UL);
+        return op >= 0321 && op <= 0327 && op != 0324;
+}
+
 static unsigned long
 build_blocks(const struct dobj_object *o, struct block **out)
 {
@@ -299,6 +306,89 @@ common_block_suffix(const struct dobj_object *ao, const struct block *a,
         return n;
 }
 
+static const struct block *
+block_at(const struct block *b, unsigned long n, unsigned long start)
+{
+        unsigned long i;
+        for (i = 0; i < n; i++)
+                if (b[i].start == start)
+                        return &b[i];
+        return NULL;
+}
+
+static int
+local_control_target(const struct dobj_object *o, unsigned long off)
+{
+        const struct dobj_reloc *r = rh_reloc(o, off);
+        unsigned int op;
+        if (r == NULL || r->type != DOBJ_RELOC_LOCAL_RH18 ||
+            r->target_sec != DOBJ_SEC_TEXT)
+                return 0;
+        op = (unsigned int)((o->text[off].lh >> 9) & 0777UL);
+        return op == 0254 || (op >= 0320 && op <= 0327);
+}
+
+/*
+ * Compare block instruction shape while abstracting a local branch target.
+ * This is for CFG-layout discovery only: final equality still goes through
+ * reassembly and p10fold.
+ */
+static int
+block_shape_equal(const struct dobj_object *ao, const struct block *a,
+    const struct dobj_object *bo, const struct block *b)
+{
+        unsigned long i, n = a->end - a->start;
+        if (n != b->end - b->start)
+                return 0;
+        for (i = 0; i < n; i++) {
+                unsigned long ap = a->start + i, bp = b->start + i;
+                if (local_control_target(ao, ap) &&
+                    local_control_target(bo, bp)) {
+                        if (ao->text[ap].lh != bo->text[bp].lh)
+                                return 0;
+                } else if (!word_at_equal(ao, ap, bo, bp)) {
+                        return 0;
+                }
+        }
+        return 1;
+}
+
+static int
+inverted_jump_blocks(const struct dobj_object *ao, const struct block *a,
+    const struct block *ab, unsigned long na,
+    const struct dobj_object *bo, const struct block *b,
+    const struct block *bb, unsigned long nb)
+{
+        unsigned long i, an = a->end - a->start;
+        unsigned int aop, bop;
+        const struct block *at, *af, *bt, *bf;
+        unsigned long opmask = 0777UL << 9;
+
+        if (an != b->end - b->start || an == 0 ||
+            a->nsucc != 2 || b->nsucc != 2)
+                return 0;
+        if (!is_invertible_jump(ao->text[a->end - 1]) ||
+            !is_invertible_jump(bo->text[b->end - 1]))
+                return 0;
+        for (i = 0; i + 1 < an; i++)
+                if (!word_at_equal(ao, a->start + i, bo, b->start + i))
+                        return 0;
+        aop = (unsigned int)((ao->text[a->end - 1].lh >> 9) & 0777UL);
+        bop = (unsigned int)((bo->text[b->end - 1].lh >> 9) & 0777UL);
+        if ((aop ^ 04U) != bop ||
+            (ao->text[a->end - 1].lh & ~opmask) !=
+            (bo->text[b->end - 1].lh & ~opmask))
+                return 0;
+        at = block_at(ab, na, a->succ[0]);
+        af = block_at(ab, na, a->succ[1]);
+        bt = block_at(bb, nb, b->succ[0]);
+        bf = block_at(bb, nb, b->succ[1]);
+        if (at == NULL || af == NULL || bt == NULL || bf == NULL)
+                return 0;
+        return block_shape_equal(ao, at, bo, bf) &&
+            block_shape_equal(ao, af, bo, bt);
+}
+
 static unsigned long
 popj_epilogue_start(const struct dobj_object *o, const struct block *b)
 {
@@ -369,6 +459,15 @@ has_fallthrough_into(const struct dobj_object *o, unsigned long off)
          * analyzer currently proves cannot reach the following word.
          */
         return op != 0254 && op != 0263;
+}
+
+static int
+retargetable_tail(const struct dobj_object *o, unsigned long off,
+    unsigned long words)
+{
+        return branch_targets_offset(o, off) != 0 &&
+            !has_fallthrough_into(o, off) && words != 0 &&
+            unconditional_end_word(o->text[off + words - 1]);
 }
 
 static int
@@ -618,6 +717,14 @@ has_common_schedule(const struct region *a, const struct region *b)
         return common_schedule_rec(a, b, ap, bp, 0, 0, 0);
 }
 
+static int
+regions_overlap(const struct region *a, const struct region *b)
+{
+        if (a->input != b->input)
+                return 0;
+        return a->off < b->off + b->n && b->off < a->off + a->n;
+}
+
 int
 main(int argc, char **argv)
 {
@@ -628,7 +735,7 @@ main(int argc, char **argv)
         unsigned long rename_matches = 0, rename_words = 0;
         int ni, ai;
 
-        if (argc < 3) {
+        if (argc < 2) {
                 usage();
                 return 2;
         }
@@ -650,27 +757,40 @@ main(int argc, char **argv)
         for (ai = 0; ai < ni; ai++) {
                 struct block *blocks = NULL;
                 unsigned long nb = build_blocks(&in[ai].obj, &blocks);
-                unsigned long bi, max = 0, words = 0;
+                unsigned long bi, max = 0, words = 0, invertible = 0;
                 for (bi = 0; bi < nb; bi++) {
                         unsigned long len = blocks[bi].end - blocks[bi].start;
                         words += len;
                         if (len > max) max = len;
+                        if (is_invertible_jump(
+                            in[ai].obj.text[blocks[bi].end - 1]))
+                                invertible++;
                 }
                 fprintf(stderr,
-                    "CFG %s: %lu BLOCKS; %lu WORDS; MAX %lu WORDS\n",
-                    in[ai].name, nb, words, max);
+                    "CFG %s: %lu BLOCKS; %lu WORDS; MAX %lu WORDS; "
+                    "%lu INVERTIBLE JUMPS\n",
+                    in[ai].name, nb, words, max, invertible);
                 free(blocks);
         }
         for (ai = 0; ai < ni; ai++) {
                 int bi;
                 struct block *ab = NULL;
                 unsigned long na = build_blocks(&in[ai].obj, &ab);
-                for (bi = ai + 1; bi < ni; bi++) {
+                for (bi = ai; bi < ni; bi++) {
                         struct block *bb = NULL;
                         unsigned long nb = build_blocks(&in[bi].obj, &bb);
                         unsigned long x, y;
                         for (x = 0; x < na; x++)
-                                for (y = 0; y < nb; y++) {
+                                for (y = (bi == ai ? x + 1 : 0);
+                                    y < nb; y++) {
+                                        if (inverted_jump_blocks(
+                                            &in[ai].obj, &ab[x], ab, na,
+                                            &in[bi].obj, &bb[y], bb, nb))
+                                                fprintf(stderr,
+                                                    "CFG-INVERT %s+%06lo <=> "
+                                                    "%s+%06lo\n",
+                                                    in[ai].name, ab[x].start,
+                                                    in[bi].name, bb[y].start);
                                         unsigned long n = common_block_suffix(
                                             &in[ai].obj, &ab[x],
                                             &in[bi].obj, &bb[y]);
@@ -682,18 +802,12 @@ main(int argc, char **argv)
                                                 fprintf(stderr,
                                                     "EPILOGUE-SUFFIX%s %s+%06lo "
                                                     "<=> %s+%06lo : %lu WORDS\n",
-                                                    (branch_targets_offset(
+                                                    (retargetable_tail(
                                                     &in[ai].obj,
-                                                    ab[x].end - en) != 0 &&
-                                                    !has_fallthrough_into(
-                                                    &in[ai].obj,
-                                                    ab[x].end - en) &&
-                                                    branch_targets_offset(
+                                                    ab[x].end - en, en) ||
+                                                    retargetable_tail(
                                                     &in[bi].obj,
-                                                    bb[y].end - en) != 0 &&
-                                                    !has_fallthrough_into(
-                                                    &in[bi].obj,
-                                                    bb[y].end - en)) ?
+                                                    bb[y].end - en, en)) ?
                                                     "-RETARGETABLE" : "",
                                                     in[ai].name,
                                                     ab[x].end - en,
@@ -701,8 +815,26 @@ main(int argc, char **argv)
                                                     bb[y].end - en, en);
                                         if (n >= 3)
                                                 fprintf(stderr,
-                                                    "CFG-SUFFIX %s+%06lo <=> "
+                                                    "CFG-SUFFIX%s%s %s+%06lo <=> "
                                                     "%s+%06lo : %lu WORDS\n",
+                                                    (retargetable_tail(
+                                                    &in[ai].obj,
+                                                    ab[x].end - n, n) ||
+                                                    retargetable_tail(
+                                                    &in[bi].obj,
+                                                    bb[y].end - n, n)) ?
+                                                    "-RETARGETABLE" : "",
+                                                    retargetable_tail(
+                                                    &in[ai].obj,
+                                                    ab[x].end - n, n) ?
+                                                    (retargetable_tail(
+                                                    &in[bi].obj,
+                                                    bb[y].end - n, n) ?
+                                                    "-AB" : "-A") :
+                                                    (retargetable_tail(
+                                                    &in[bi].obj,
+                                                    bb[y].end - n, n) ?
+                                                    "-B" : ""),
                                                     in[ai].name,
                                                     ab[x].end - n,
                                                     in[bi].name,
@@ -754,7 +886,7 @@ main(int argc, char **argv)
                 for (unsigned long j = i + 1; j < nr; j++) {
                         int sched;
                         int renamed;
-                        if (r[i].input == r[j].input ||
+                        if (regions_overlap(&r[i], &r[j]) ||
                             r[i].n != r[j].n)
                                 continue;
                         sched = has_common_schedule(&r[i], &r[j]);
