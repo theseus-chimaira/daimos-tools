@@ -16,6 +16,18 @@
 #define MAX_REGION 8UL
 #define F_FIXED 1U
 
+struct block {
+        unsigned long start;
+        unsigned long end;
+        unsigned long succ[2];
+        unsigned int nsucc;
+};
+
+#define NO_SUCC (~0UL)
+
+static const struct dobj_reloc *rh_reloc(const struct dobj_object *,
+    unsigned long);
+
 struct input {
         const char *name;
         struct dobj_object obj;
@@ -50,6 +62,118 @@ unconditional_end_word(struct dobj_word w)
 {
         unsigned long op = (w.lh >> 9) & 0777UL;
         return op == 0254UL || op == 0263UL; /* JRST, POPJ */
+}
+
+static int
+is_skip_opcode(unsigned int op)
+{
+        if (op >= 0300 && op <= 0317)
+                return (op & 07U) != 0;
+        if (op >= 0600 && op <= 0677)
+                return (op & 07U) != 0;
+        if (op >= 0320 && op <= 0377)
+                return (op & 07U) != 0;
+        return 0;
+}
+
+static int
+is_control_word(struct dobj_word w)
+{
+        unsigned int op = (unsigned int)((w.lh >> 9) & 0777UL);
+        if (op == 0254 || op == 0263)
+                return 1;
+        if (op >= 0320 && op <= 0327) /* JUMP family */
+                return 1;
+        return is_skip_opcode(op);
+}
+
+static unsigned long
+build_blocks(const struct dobj_object *o, struct block **out)
+{
+        unsigned char *leader;
+        struct block *b;
+        unsigned long i, n = 0, cap = 0;
+
+        if (o->text_words == 0) {
+                *out = NULL;
+                return 0;
+        }
+        leader = calloc((size_t)o->text_words, 1);
+        if (leader == NULL)
+                return 0;
+        leader[0] = 1;
+        for (i = 0; i < o->symbol_count; i++)
+                if (o->symbols[i].kind == DOBJ_SYM_DEF &&
+                    o->symbols[i].sec == DOBJ_SEC_TEXT &&
+                    o->symbols[i].value.rh < o->text_words)
+                        leader[o->symbols[i].value.rh] = 1;
+        for (i = 0; i < o->reloc_count; i++) {
+                const struct dobj_reloc *r = &o->relocs[i];
+                if ((r->type == DOBJ_RELOC_LOCAL_RH18 ||
+                    r->type == DOBJ_RELOC_LOCAL_LH18) &&
+                    r->target_sec == DOBJ_SEC_TEXT &&
+                    r->addend.rh < o->text_words)
+                        leader[r->addend.rh] = 1;
+        }
+        for (i = 0; i + 1 < o->text_words; i++)
+                if (is_control_word(o->text[i]))
+                        leader[i + 1] = 1;
+
+        for (i = 0; i < o->text_words; ) {
+                unsigned long end = i + 1;
+                struct block *q;
+                while (end < o->text_words && !leader[end])
+                        end++;
+                if (n == cap) {
+                        unsigned long nc = cap ? cap * 2 : 64;
+                        q = realloc(*out, (size_t)nc * sizeof(**out));
+                        if (q == NULL) {
+                                free(leader);
+                                free(*out);
+                                *out = NULL;
+                                return 0;
+                        }
+                        *out = q;
+                        cap = nc;
+                }
+                b = *out;
+                b[n].start = i;
+                b[n].end = end;
+                b[n].succ[0] = b[n].succ[1] = NO_SUCC;
+                b[n].nsucc = 0;
+                n++;
+                i = end;
+        }
+        b = *out;
+        for (i = 0; i < n; i++) {
+                unsigned long last = b[i].end - 1;
+                unsigned int op = (unsigned int)((o->text[last].lh >> 9) & 0777UL);
+                const struct dobj_reloc *rr = rh_reloc(o, last);
+                unsigned long target = NO_SUCC;
+
+                if (rr != NULL && rr->type == DOBJ_RELOC_LOCAL_RH18 &&
+                    rr->target_sec == DOBJ_SEC_TEXT &&
+                    rr->addend.rh < o->text_words)
+                        target = rr->addend.rh;
+                if (op == 0254) { /* JRST */
+                        if (target != NO_SUCC)
+                                b[i].succ[b[i].nsucc++] = target;
+                } else if (op >= 0320 && op <= 0327) { /* JUMP */
+                        if (target != NO_SUCC)
+                                b[i].succ[b[i].nsucc++] = target;
+                        if (b[i].end < o->text_words && b[i].nsucc < 2)
+                                b[i].succ[b[i].nsucc++] = b[i].end;
+                } else if (is_skip_opcode(op)) {
+                        if (b[i].end < o->text_words)
+                                b[i].succ[b[i].nsucc++] = b[i].end;
+                        if (b[i].end + 1 < o->text_words && b[i].nsucc < 2)
+                                b[i].succ[b[i].nsucc++] = b[i].end + 1;
+                } else if (op != 0263 && b[i].end < o->text_words) {
+                        b[i].succ[b[i].nsucc++] = b[i].end;
+                }
+        }
+        free(leader);
+        return n;
 }
 
 static void
@@ -120,6 +244,31 @@ insn_equal(const struct insn *a, const struct insn *b)
                 return 0;
         return reloc_equal(a->obj, a->off, b->obj, b->off, 1) &&
             reloc_equal(a->obj, a->off, b->obj, b->off, 0);
+}
+
+static int
+word_at_equal(const struct dobj_object *ao, unsigned long aoff,
+    const struct dobj_object *bo, unsigned long boff)
+{
+        struct insn a, b;
+        memset(&a, 0, sizeof(a));
+        memset(&b, 0, sizeof(b));
+        a.word = ao->text[aoff]; a.obj = ao; a.off = aoff;
+        b.word = bo->text[boff]; b.obj = bo; b.off = boff;
+        return insn_equal(&a, &b);
+}
+
+static unsigned long
+common_block_suffix(const struct dobj_object *ao, const struct block *a,
+    const struct dobj_object *bo, const struct block *b)
+{
+        unsigned long n = 0;
+        unsigned long an = a->end - a->start;
+        unsigned long bn = b->end - b->start;
+        while (n < an && n < bn &&
+            word_at_equal(ao, a->end - 1 - n, bo, b->end - 1 - n))
+                n++;
+        return n;
 }
 
 static int
@@ -397,6 +546,46 @@ main(int argc, char **argv)
                         return 1;
                 }
                 fclose(f);
+        }
+        for (ai = 0; ai < ni; ai++) {
+                struct block *blocks = NULL;
+                unsigned long nb = build_blocks(&in[ai].obj, &blocks);
+                unsigned long bi, max = 0, words = 0;
+                for (bi = 0; bi < nb; bi++) {
+                        unsigned long len = blocks[bi].end - blocks[bi].start;
+                        words += len;
+                        if (len > max) max = len;
+                }
+                fprintf(stderr,
+                    "CFG %s: %lu BLOCKS; %lu WORDS; MAX %lu WORDS\n",
+                    in[ai].name, nb, words, max);
+                free(blocks);
+        }
+        for (ai = 0; ai < ni; ai++) {
+                int bi;
+                struct block *ab = NULL;
+                unsigned long na = build_blocks(&in[ai].obj, &ab);
+                for (bi = ai + 1; bi < ni; bi++) {
+                        struct block *bb = NULL;
+                        unsigned long nb = build_blocks(&in[bi].obj, &bb);
+                        unsigned long x, y;
+                        for (x = 0; x < na; x++)
+                                for (y = 0; y < nb; y++) {
+                                        unsigned long n = common_block_suffix(
+                                            &in[ai].obj, &ab[x],
+                                            &in[bi].obj, &bb[y]);
+                                        if (n >= 3)
+                                                fprintf(stderr,
+                                                    "CFG-SUFFIX %s+%06lo <=> "
+                                                    "%s+%06lo : %lu WORDS\n",
+                                                    in[ai].name,
+                                                    ab[x].end - n,
+                                                    in[bi].name,
+                                                    bb[y].end - n, n);
+                                }
+                        free(bb);
+                }
+                free(ab);
         }
         for (ai = 0; ai < ni; ai++) {
                 unsigned long start;
