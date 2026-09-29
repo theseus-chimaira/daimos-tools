@@ -28,6 +28,10 @@ assemble and pass the exact relocation-aware `p10fold` checks.
 accounting distinguishes removable unnamed donor blocks from address-stable
 anchors and also considers aligned removable subruns inside longer duplicate
 runs, so a non-removable maximal match does not hide a legal shorter fold.
+With `-P fold.plan`, it writes the selected non-overlapping zero-cost folds as
+a `P10FOLD1` plan. `dlink --fold-plan fold.plan` consumes that plan while
+laying out TEXT, omits donor words, retargets references to the retained anchor,
+and shifts later symbols and relocations through the compacted TEXT map.
 
 THE DAS ASSEMBLER AND THE TEST SUITES ARE MAINTAINED IN SEPARATE PROJECTS.
 

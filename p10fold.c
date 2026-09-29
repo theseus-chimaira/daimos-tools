@@ -28,7 +28,8 @@ struct group {
 static void
 usage(void)
 {
-        fprintf(stderr, "usage: p10fold [-m min-words] object.dobj ...\n");
+        fprintf(stderr,
+            "usage: p10fold [-m min-words] [-P fold.plan] object.dobj ...\n");
 }
 
 static int
@@ -395,19 +396,29 @@ main(int argc, char **argv)
         unsigned long group_count = 0UL;
         unsigned long group_cap = 0UL;
         int first = 1;
+        const char *plan_name = NULL;
         int count;
         int ai;
         int bi;
 
-        if (argc > 3 && strcmp(argv[1], "-m") == 0) {
-                char *end;
-
-                min_words = strtoul(argv[2], &end, 0);
-                if (*argv[2] == '\0' || *end != '\0' || min_words < 1UL) {
+        while (first < argc && argv[first][0] == '-') {
+                if (strcmp(argv[first], "-m") == 0 && first + 1 < argc) {
+                        char *end;
+                        min_words = strtoul(argv[first + 1], &end, 0);
+                        if (*argv[first + 1] == '\0' || *end != '\0' ||
+                            min_words < 1UL) {
+                                usage();
+                                return 2;
+                        }
+                        first += 2;
+                } else if (strcmp(argv[first], "-P") == 0 &&
+                    first + 1 < argc) {
+                        plan_name = argv[first + 1];
+                        first += 2;
+                } else {
                         usage();
                         return 2;
                 }
-                first = 3;
         }
         if (argc - first < 1) {
                 usage();
@@ -595,6 +606,20 @@ main(int argc, char **argv)
                 unsigned long accepted = 0UL;
                 unsigned long saved = 0UL;
                 unsigned long gi;
+                FILE *plan = NULL;
+
+                if (plan_name != NULL) {
+                        plan = fopen(plan_name, "w");
+                        if (plan == NULL) {
+                                perror(plan_name);
+                                return 1;
+                        }
+                        if (fprintf(plan, "P10FOLD1\n") < 0) {
+                                fclose(plan);
+                                remove(plan_name);
+                                return 1;
+                        }
+                }
 
                 used = (unsigned char **)calloc((size_t)count, sizeof(*used));
                 if (used == NULL)
@@ -614,6 +639,7 @@ main(int argc, char **argv)
                         unsigned long usable = 0UL;
                         unsigned long removable = 0UL;
                         unsigned long group_saved;
+                        unsigned long anchor = ~0UL;
                         int blocked = 0;
 
                         for (oi = 0UL; oi < g->count; oi++) {
@@ -639,6 +665,33 @@ main(int argc, char **argv)
                         if (removable == 0UL)
                                 continue;
                         group_saved = g->words * removable;
+                        for (oi = 0UL; oi < g->count; oi++) {
+                                struct occurrence *o = &g->occ[oi];
+                                unsigned long j;
+                                int occ_blocked = 0;
+                                for (j = 0UL; j < g->words; j++)
+                                        if (used[o->input][o->off + j])
+                                                occ_blocked = 1;
+                                if (!occ_blocked && !o->removable) {
+                                        anchor = oi;
+                                        break;
+                                }
+                        }
+                        if (anchor == ~0UL)
+                                for (oi = 0UL; oi < g->count; oi++) {
+                                        struct occurrence *o = &g->occ[oi];
+                                        unsigned long j;
+                                        int occ_blocked = 0;
+                                        for (j = 0UL; j < g->words; j++)
+                                                if (used[o->input][o->off + j])
+                                                        occ_blocked = 1;
+                                        if (!occ_blocked) {
+                                                anchor = oi;
+                                                break;
+                                        }
+                                }
+                        if (anchor == ~0UL)
+                                continue;
                         printf("GROUP %lu: %lu WORDS x %lu COPIES; SAVE %lu\n",
                             accepted + 1UL, g->words, g->count,
                             group_saved);
@@ -653,6 +706,17 @@ main(int argc, char **argv)
                                     inputs[o->input].name, o->off,
                                     s ? " (" : "", s ? s : "",
                                     s ? ")" : "");
+                                if (plan != NULL && oi != anchor &&
+                                    o->removable &&
+                                    fprintf(plan,
+                                    "FOLD\t%s\t%lo\t%s\t%lo\t%lo\n",
+                                    inputs[o->input].name, o->off,
+                                    inputs[g->occ[anchor].input].name,
+                                    g->occ[anchor].off, g->words) < 0) {
+                                        fclose(plan);
+                                        remove(plan_name);
+                                        return 1;
+                                }
                                 for (j = 0UL; j < g->words; j++)
                                         used[o->input][o->off + j] = 1U;
                         }
@@ -661,9 +725,23 @@ main(int argc, char **argv)
                 }
                 printf("ZERO-COST NON-OVERLAPPING TOTAL: %lu GROUPS; "
                     "%lu WORDS SAVED\n", accepted, saved);
+                if (plan != NULL && fclose(plan) != 0) {
+                        remove(plan_name);
+                        return 1;
+                }
                 for (ai = 0; ai < count; ai++)
                         free(used[ai]);
                 free(used);
+        } else if (plan_name != NULL) {
+                FILE *plan = fopen(plan_name, "w");
+                if (plan == NULL) {
+                        perror(plan_name);
+                        return 1;
+                }
+                if (fprintf(plan, "P10FOLD1\n") < 0 || fclose(plan) != 0) {
+                        remove(plan_name);
+                        return 1;
+                }
         }
         for (ai = 0; ai < (int)group_count; ai++)
                 free(groups[ai].occ);

@@ -15,9 +15,21 @@
 #define PURITY_PURE    1
 struct link_object {
     struct dobj_object obj;
+    char *source_name;
     unsigned long text_base;
     unsigned long data_base;
     unsigned long bss_base;
+    unsigned long kept_text_words;
+    unsigned long *text_map;
+    unsigned char *text_keep;
+};
+
+struct fold_rule {
+    int donor_object;
+    unsigned long donor_off;
+    int anchor_object;
+    unsigned long anchor_off;
+    unsigned long words;
 };
 
 struct link_archive {
@@ -46,6 +58,9 @@ struct linker {
     int def_count;
     int def_cap;
     int daimos_uuo_relax;
+    struct fold_rule *folds;
+    int fold_count;
+    int fold_cap;
 };
 
 
@@ -117,6 +132,19 @@ static void *grow_array(void *p, int *cap, size_t elem_size)
     return q;
 }
 
+static char *dup_string(const char *s)
+{
+    size_t n;
+    char *p;
+    if (s == NULL)
+        return NULL;
+    n = strlen(s) + 1U;
+    p = (char *)malloc(n);
+    if (p != NULL)
+        memcpy(p, s, n);
+    return p;
+}
+
 static struct dobj_word sixbit_word(const char *s)
 {
     struct dobj_word w;
@@ -133,7 +161,8 @@ static struct dobj_word sixbit_word(const char *s)
     return w;
 }
 
-static int add_object(struct linker *l, struct dobj_object *obj)
+static int add_object(struct linker *l, struct dobj_object *obj,
+                      const char *source_name)
 {
     if (l->object_count == l->object_cap) {
         void *p;
@@ -142,9 +171,187 @@ static int add_object(struct linker *l, struct dobj_object *obj)
             return -1;
         l->objects = (struct link_object *)p;
     }
+    memset(&l->objects[l->object_count], 0,
+           sizeof(l->objects[l->object_count]));
     l->objects[l->object_count].obj = *obj;
+    l->objects[l->object_count].kept_text_words = obj->text_words;
+    l->objects[l->object_count].source_name = dup_string(source_name);
+    if (source_name != NULL &&
+        l->objects[l->object_count].source_name == NULL)
+        return -1;
     memset(obj, 0, sizeof(*obj));
     l->object_count++;
+    return 0;
+}
+
+static int find_object_by_name(const struct linker *l, const char *name)
+{
+    int i;
+    for (i = 0; i < l->object_count; i++)
+        if (l->objects[i].source_name != NULL &&
+            strcmp(l->objects[i].source_name, name) == 0)
+            return i;
+    return -1;
+}
+
+static int add_fold_rule(struct linker *l, int donor_object,
+                         unsigned long donor_off, int anchor_object,
+                         unsigned long anchor_off, unsigned long words)
+{
+    struct fold_rule *r;
+    if (words == 0UL)
+        return -1;
+    if (l->fold_count == l->fold_cap) {
+        void *p = grow_array(l->folds, &l->fold_cap, sizeof(l->folds[0]));
+        if (p == NULL)
+            return -1;
+        l->folds = (struct fold_rule *)p;
+    }
+    r = &l->folds[l->fold_count++];
+    r->donor_object = donor_object;
+    r->donor_off = donor_off;
+    r->anchor_object = anchor_object;
+    r->anchor_off = anchor_off;
+    r->words = words;
+    return 0;
+}
+
+static int load_fold_plan(struct linker *l, const char *name)
+{
+    FILE *f;
+    char line[4096];
+    int first_line = 1;
+
+    f = fopen(name, "r");
+    if (f == NULL) {
+        perror(name);
+        return -1;
+    }
+    while (fgets(line, sizeof(line), f) != NULL) {
+        char *kind, *dn, *doff, *an, *aoff, *words, *save;
+        unsigned long dv, av, wv;
+        char *end;
+        int di, ai;
+
+        line[strcspn(line, "\r\n")] = '\0';
+        if (first_line) {
+            first_line = 0;
+            if (strcmp(line, "P10FOLD1") != 0) {
+                fprintf(stderr, "dlink: bad fold plan header\n");
+                fclose(f);
+                return -1;
+            }
+            continue;
+        }
+        if (line[0] == '\0')
+            continue;
+        kind = strtok(line, "\t");
+        dn = strtok(NULL, "\t");
+        doff = strtok(NULL, "\t");
+        an = strtok(NULL, "\t");
+        aoff = strtok(NULL, "\t");
+        words = strtok(NULL, "\t");
+        save = strtok(NULL, "\t");
+        if (kind == NULL || strcmp(kind, "FOLD") != 0 || dn == NULL ||
+            doff == NULL || an == NULL || aoff == NULL || words == NULL ||
+            save != NULL) {
+            fprintf(stderr, "dlink: malformed fold plan line\n");
+            fclose(f);
+            return -1;
+        }
+        dv = strtoul(doff, &end, 8);
+        if (*doff == '\0' || *end != '\0') {
+            fclose(f);
+            return -1;
+        }
+        av = strtoul(aoff, &end, 8);
+        if (*aoff == '\0' || *end != '\0') {
+            fclose(f);
+            return -1;
+        }
+        wv = strtoul(words, &end, 8);
+        if (*words == '\0' || *end != '\0' || wv == 0UL) {
+            fclose(f);
+            return -1;
+        }
+        di = find_object_by_name(l, dn);
+        ai = find_object_by_name(l, an);
+        if (di < 0 || ai < 0) {
+            fprintf(stderr, "dlink: fold plan object not found: %s / %s\n",
+                    dn, an);
+            fclose(f);
+            return -1;
+        }
+        if (dv + wv > l->objects[di].obj.text_words ||
+            av + wv > l->objects[ai].obj.text_words) {
+            fprintf(stderr, "dlink: fold range outside object TEXT\n");
+            fclose(f);
+            return -1;
+        }
+        if (add_fold_rule(l, di, dv, ai, av, wv) != 0) {
+            fclose(f);
+            return -1;
+        }
+    }
+    if (ferror(f) || first_line) {
+        fclose(f);
+        return -1;
+    }
+    fclose(f);
+    return 0;
+}
+
+static int prepare_text_maps(struct linker *l)
+{
+    int oi, fi;
+    for (oi = 0; oi < l->object_count; oi++) {
+        struct link_object *o = &l->objects[oi];
+        if (o->obj.text_words == 0UL)
+            continue;
+        o->text_keep = (unsigned char *)malloc((size_t)o->obj.text_words);
+        o->text_map = (unsigned long *)malloc(
+            (size_t)(o->obj.text_words + 1UL) * sizeof(*o->text_map));
+        if (o->text_keep == NULL || o->text_map == NULL)
+            return -1;
+        memset(o->text_keep, 1, (size_t)o->obj.text_words);
+    }
+    for (fi = 0; fi < l->fold_count; fi++) {
+        struct fold_rule *r = &l->folds[fi];
+        struct link_object *d = &l->objects[r->donor_object];
+        unsigned long i;
+        for (i = 0UL; i < r->words; i++) {
+            if (!d->text_keep[r->donor_off + i]) {
+                fprintf(stderr, "dlink: overlapping fold donors\n");
+                return -1;
+            }
+            d->text_keep[r->donor_off + i] = 0;
+        }
+    }
+    for (fi = 0; fi < l->fold_count; fi++) {
+        struct fold_rule *r = &l->folds[fi];
+        struct link_object *a = &l->objects[r->anchor_object];
+        unsigned long i;
+        for (i = 0UL; i < r->words; i++)
+            if (!a->text_keep[r->anchor_off + i]) {
+                fprintf(stderr, "dlink: fold anchor is also removed\n");
+                return -1;
+            }
+    }
+    for (oi = 0; oi < l->object_count; oi++) {
+        struct link_object *o = &l->objects[oi];
+        unsigned long i, kept = 0UL;
+        if (o->obj.text_words == 0UL) {
+            o->kept_text_words = 0UL;
+            continue;
+        }
+        for (i = 0UL; i < o->obj.text_words; i++) {
+            o->text_map[i] = kept;
+            if (o->text_keep[i])
+                kept++;
+        }
+        o->text_map[o->obj.text_words] = kept;
+        o->kept_text_words = kept;
+    }
     return 0;
 }
 
@@ -226,7 +433,7 @@ static int try_extract(struct linker *l, const char *name)
             fprintf(stderr, "dlink: bad archive member for %s\n", name);
             return -1;
         }
-        if (add_object(l, &obj) != 0) {
+        if (add_object(l, &obj, NULL) != 0) {
             dobj_free(&obj);
             return -1;
         }
@@ -420,7 +627,7 @@ static int layout(struct linker *l, unsigned long *text_words,
     t = d = b = 0UL;
     for (i = 0; i < l->object_count; i++) {
         l->objects[i].text_base = t;
-        t += l->objects[i].obj.text_words;
+        t += l->objects[i].kept_text_words;
     }
     for (i = 0; i < l->object_count; i++) {
         l->objects[i].data_base = t + d;
@@ -439,6 +646,48 @@ static int layout(struct linker *l, unsigned long *text_words,
     *data_words = d;
     *bss_words = b;
     return 0;
+}
+
+static int mapped_text_offset(struct linker *l, int oi, unsigned long off,
+                              int *mapped_object, unsigned long *mapped_off)
+{
+    int fi;
+    struct link_object *o;
+    if (oi < 0 || oi >= l->object_count)
+        return -1;
+    o = &l->objects[oi];
+    if (off > o->obj.text_words)
+        return -1;
+    if (off == o->obj.text_words) {
+        *mapped_object = oi;
+        *mapped_off = off;
+        return 0;
+    }
+    for (fi = 0; fi < l->fold_count; fi++) {
+        const struct fold_rule *r = &l->folds[fi];
+        if (r->donor_object == oi && off >= r->donor_off &&
+            off < r->donor_off + r->words) {
+            *mapped_object = r->anchor_object;
+            *mapped_off = r->anchor_off + (off - r->donor_off);
+            return 0;
+        }
+    }
+    *mapped_object = oi;
+    *mapped_off = off;
+    return 0;
+}
+
+static int text_address(struct linker *l, int oi, unsigned long off,
+                        unsigned long *addr)
+{
+    int mo;
+    unsigned long mapped;
+    if (mapped_text_offset(l, oi, off, &mo, &mapped) != 0)
+        return -1;
+    if (l->objects[mo].text_map != NULL)
+        mapped = l->objects[mo].text_map[mapped];
+    *addr = l->image_base + l->objects[mo].text_base + mapped;
+    return *addr <= HALF_MASK ? 0 : -1;
 }
 
 static unsigned long section_offset(const struct link_object *o, int sec)
@@ -474,7 +723,12 @@ static int symbol_address(struct linker *l, int def_index,
     if (s->sec < DOBJ_SEC_TEXT || s->sec > DOBJ_SEC_BSS ||
         s->value.lh != 0UL)
         return -1;
-    *addr = section_base(l, o, s->sec) + s->value.rh;
+    if (s->sec == DOBJ_SEC_TEXT) {
+        if (text_address(l, d->object_index, s->value.rh, addr) != 0)
+            return -1;
+    } else {
+        *addr = section_base(l, o, s->sec) + s->value.rh;
+    }
     *relative = 1;
     return *addr <= HALF_MASK ? 0 : -1;
 }
@@ -527,7 +781,11 @@ static int apply_relocs(struct linker *l, struct dobj_word *image,
             r = &lo->obj.relocs[ri];
             if (r->loc_sec == DOBJ_SEC_TEXT) {
                 if (r->offset >= lo->obj.text_words) return -1;
-                loc = lo->text_base + r->offset;
+                if (lo->text_keep != NULL && !lo->text_keep[r->offset])
+                    continue;
+                loc = lo->text_base +
+                    (lo->text_map != NULL ? lo->text_map[r->offset] :
+                    r->offset);
             } else if (r->loc_sec == DOBJ_SEC_DATA) {
                 if (r->offset >= lo->obj.data_words) return -1;
                 loc = lo->data_base + r->offset;
@@ -543,7 +801,21 @@ static int apply_relocs(struct linker *l, struct dobj_word *image,
                 r->type == DOBJ_RELOC_LOCAL_LH18) {
                 if (r->target_sec < DOBJ_SEC_TEXT || r->target_sec > DOBJ_SEC_BSS)
                     return -1;
-                target = section_base(l, lo, r->target_sec);
+                if (r->target_sec == DOBJ_SEC_TEXT && add >= 0L &&
+                    (unsigned long)add <= lo->obj.text_words) {
+                    if (text_address(l, oi, (unsigned long)add,
+                        &target) != 0)
+                        return -1;
+                    add = 0L;
+                } else {
+                    if (r->target_sec == DOBJ_SEC_TEXT &&
+                        l->fold_count != 0) {
+                        fprintf(stderr,
+                            "dlink: cannot fold out-of-range local TEXT addend\n");
+                        return -1;
+                    }
+                    target = section_base(l, lo, r->target_sec);
+                }
                 relative = l->image_base == 0UL;
             } else if (r->type == DOBJ_RELOC_SYMBOL_RH18 ||
                        r->type == DOBJ_RELOC_SYMBOL_LH18) {
@@ -643,7 +915,12 @@ static int write_dxr(const char *name, struct linker *l, int purity_request, int
     for (i = 0; i < l->object_count; i++) {
         unsigned long j;
         for (j = 0UL; j < l->objects[i].obj.text_words; j++)
-            image[l->objects[i].text_base + j] = l->objects[i].obj.text[j];
+            if (l->objects[i].text_keep == NULL ||
+                l->objects[i].text_keep[j])
+                image[l->objects[i].text_base +
+                    (l->objects[i].text_map != NULL ?
+                    l->objects[i].text_map[j] : j)] =
+                    l->objects[i].obj.text[j];
         for (j = 0UL; j < l->objects[i].obj.data_words; j++)
             image[l->objects[i].data_base + j] = l->objects[i].obj.data[j];
     }
@@ -735,7 +1012,10 @@ static int write_mres_object(const char *name, const char *package_symbol,
         unsigned long j;
         struct link_object *lo = &l->objects[i];
         for (j = 0UL; j < lo->obj.text_words; j++)
-            image[lo->text_base + j] = lo->obj.text[j];
+            if (lo->text_keep == NULL || lo->text_keep[j])
+                image[lo->text_base +
+                    (lo->text_map != NULL ? lo->text_map[j] : j)] =
+                    lo->obj.text[j];
         for (j = 0UL; j < lo->obj.data_words; j++)
             image[lo->data_base + j] = lo->obj.data[j];
     }
@@ -856,7 +1136,7 @@ static int add_abs_map(struct linker *l, const char *name)
         return -1;
     }
     fclose(f);
-    if (add_object(l, &obj) != 0) {
+    if (add_object(l, &obj, NULL) != 0) {
         dobj_free(&obj);
         return -1;
     }
@@ -866,8 +1146,12 @@ static int add_abs_map(struct linker *l, const char *name)
 static void cleanup(struct linker *l)
 {
     int i;
-    for (i = 0; i < l->object_count; i++)
+    for (i = 0; i < l->object_count; i++) {
         dobj_free(&l->objects[i].obj);
+        free(l->objects[i].source_name);
+        free(l->objects[i].text_map);
+        free(l->objects[i].text_keep);
+    }
     for (i = 0; i < l->archive_count; i++) {
         dobj_archive_close(&l->archives[i].ar);
         fclose(l->archives[i].file);
@@ -876,11 +1160,12 @@ static void cleanup(struct linker *l)
     free(l->objects);
     free(l->archives);
     free(l->defs);
+    free(l->folds);
 }
 
 static void usage(void)
 {
-    fprintf(stderr, "usage: dlink -o out.dxr [--pure] [--rt-required] [--daimos-uuo-relax] [-M out.map] [-b octal] [-A map] [-R out.dobj -N symbol [-X export] ...] input.dobj|library.darc ...\n");
+    fprintf(stderr, "usage: dlink -o out.dxr [--pure] [--rt-required] [--daimos-uuo-relax] [--fold-plan file] [-M out.map] [-b octal] [-A map] [-R out.dobj -N symbol [-X export] ...] input.dobj|library.darc ...\n");
 }
 
 int main(int argc, char **argv)
@@ -891,6 +1176,7 @@ int main(int argc, char **argv)
     const char *abs_maps[32];
     const char *mres_out;
     const char *mres_symbol;
+    const char *fold_plan;
     const char *mres_exports[32];
     int abs_map_count;
     int mres_export_count;
@@ -906,6 +1192,7 @@ int main(int argc, char **argv)
     abs_map_count = 0;
     mres_out = NULL;
     mres_symbol = NULL;
+    fold_plan = NULL;
     mres_export_count = 0;
     l.image_base = 0UL;
     l.daimos_uuo_relax = 0;
@@ -925,6 +1212,10 @@ int main(int argc, char **argv)
         } else if (strcmp(argv[first], "--daimos-uuo-relax") == 0) {
             l.daimos_uuo_relax = 1;
             first++;
+        } else if (strcmp(argv[first], "--fold-plan") == 0 &&
+                   first + 1 < argc) {
+            fold_plan = argv[first + 1];
+            first += 2;
         } else if (strcmp(argv[first], "-M") == 0 && first + 1 < argc) {
             map = argv[first + 1];
             first += 2;
@@ -965,7 +1256,7 @@ int main(int argc, char **argv)
         if (dobj_is_object(f)) {
             struct dobj_object obj;
             if (fseek(f, 0L, SEEK_SET) != 0 || dobj_read(f, &obj) != 0 ||
-                add_object(&l, &obj) != 0) {
+                add_object(&l, &obj, argv[i]) != 0) {
                 fclose(f); goto done;
             }
             fclose(f);
@@ -988,6 +1279,10 @@ int main(int argc, char **argv)
         }
     }
     if (resolve_archives(&l) != 0 || check_undefined(&l) != 0)
+        goto done;
+    if (fold_plan != NULL &&
+        (load_fold_plan(&l, fold_plan) != 0 ||
+         prepare_text_maps(&l) != 0))
         goto done;
     if (write_dxr(out, &l, purity_request, rt_required) != 0) {
         fprintf(stderr, "dlink: link failed\n");
