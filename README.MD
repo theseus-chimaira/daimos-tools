@@ -10,9 +10,11 @@ opportunities. It models a conservative subset of PDP-10 register, memory,
 half-word, compare and test semantics, and searches legal instruction
 schedules within bounded straight-line regions.
 
-The tool is advisory: `SCHEDULE` results require no AC renaming, while
-`RENAME` results also require a consistent AC renaming and therefore need
-liveness/calling-convention proof before source changes are attempted.
+The tool is advisory: `SCHEDULE` results require no AC renaming. `RENAME`
+results require a consistent AC renaming and are emitted only when each
+renamed AC is conservatively proven local to the compared region: its incoming
+value is killed before use and its outgoing value is killed before a later
+read. Unknown instructions and control-flow boundaries stop that proof.
 Neither class is folded directly; changed source must still assemble and pass
 the exact relocation-aware `p10fold` checks.
 

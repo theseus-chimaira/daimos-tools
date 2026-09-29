@@ -57,6 +57,7 @@ struct region {
         unsigned long n;
         struct insn insn[MAX_REGION];
         int tail_candidate;
+        unsigned long renameable;
 };
 
 static int
@@ -332,6 +333,13 @@ block_at(const struct block *b, unsigned long n, unsigned long start)
 }
 
 static int
+same_block_occurrence(const struct dobj_object *ao, const struct block *a,
+    const struct dobj_object *bo, const struct block *b)
+{
+        return ao == bo && a->start == b->start && a->end == b->end;
+}
+
+static int
 local_control_target(const struct dobj_object *o, unsigned long off)
 {
         const struct dobj_reloc *r = rh_reloc(o, off);
@@ -405,6 +413,47 @@ inverted_jump_blocks(const struct dobj_object *ao, const struct block *a,
                 return 0;
         return block_shape_equal(ao, at, bo, bf) &&
             block_shape_equal(ao, af, bo, bt);
+}
+
+static unsigned long
+inverted_jump_suffix_score(const struct dobj_object *ao,
+    const struct block *a, const struct block *ab, unsigned long na,
+    const struct dobj_object *bo, const struct block *b,
+    const struct block *bb, unsigned long nb,
+    unsigned long *taken_suffix, unsigned long *fall_suffix)
+{
+        unsigned long i, an = a->end - a->start;
+        unsigned int aop, bop;
+        const struct block *at, *af, *bt, *bf;
+        unsigned long opmask = 0777UL << 9;
+
+        *taken_suffix = *fall_suffix = 0;
+        if (an != b->end - b->start || an == 0 ||
+            a->nsucc != 2 || b->nsucc != 2)
+                return 0;
+        if (!is_invertible_jump(ao->text[a->end - 1]) ||
+            !is_invertible_jump(bo->text[b->end - 1]))
+                return 0;
+        for (i = 0; i + 1 < an; i++)
+                if (!word_at_equal(ao, a->start + i, bo, b->start + i))
+                        return 0;
+        aop = (unsigned int)((ao->text[a->end - 1].lh >> 9) & 0777UL);
+        bop = (unsigned int)((bo->text[b->end - 1].lh >> 9) & 0777UL);
+        if ((aop ^ 04U) != bop ||
+            (ao->text[a->end - 1].lh & ~opmask) !=
+            (bo->text[b->end - 1].lh & ~opmask))
+                return 0;
+        at = block_at(ab, na, a->succ[0]);
+        af = block_at(ab, na, a->succ[1]);
+        bt = block_at(bb, nb, b->succ[0]);
+        bf = block_at(bb, nb, b->succ[1]);
+        if (at == NULL || af == NULL || bt == NULL || bf == NULL)
+                return 0;
+        if (!same_block_occurrence(ao, at, bo, bf))
+                *taken_suffix = common_block_suffix(ao, at, bo, bf);
+        if (!same_block_occurrence(ao, af, bo, bt))
+                *fall_suffix = common_block_suffix(ao, af, bo, bt);
+        return *taken_suffix + *fall_suffix;
 }
 
 static unsigned long
@@ -605,6 +654,47 @@ decode_safe(const struct dobj_object *o, unsigned long off, struct insn *d)
         }
 }
 
+/*
+ * Prove that AC is a region-local temporary.  The incoming value must be
+ * killed before any read inside the region, and the value produced by the
+ * region must be killed before any later read.  Stop at unknown/control
+ * instructions; uncertainty means the AC is not renameable.
+ */
+static int
+ac_local_to_region(const struct dobj_object *o, unsigned long off,
+    unsigned long n, unsigned int ac)
+{
+        unsigned long i;
+        unsigned long bit = 1UL << ac;
+        int killed_in = 0;
+
+        if (ac == 0 || ac == 15)
+                return 0;
+        for (i = 0; i < n; i++) {
+                struct insn d;
+                if (!decode_safe(o, off + i, &d))
+                        return 0;
+                if (!killed_in && (d.reads & bit))
+                        return 0;
+                if (d.writes & bit)
+                        killed_in = 1;
+        }
+        if (!killed_in)
+                return 0;
+        for (i = off + n; i < o->text_words; i++) {
+                struct insn d;
+                if (is_control_word(o->text[i]))
+                        return 0;
+                if (!decode_safe(o, i, &d))
+                        return 0;
+                if (d.reads & bit)
+                        return 0;
+                if (d.writes & bit)
+                        return 1;
+        }
+        return 0;
+}
+
 static int
 independent(const struct insn *a, const struct insn *b)
 {
@@ -702,8 +792,15 @@ common_rename_rec(const struct region *a, const struct region *b,
                 if ((adone & (1U << i)) || (ap[i] & ~adone)) continue;
                 for (j = 0; j < b->n; j++) {
                         int am[16], bm[16];
+                        unsigned int aa, ba;
                         if ((bdone & (1U << j)) || (bp[j] & ~bdone)) continue;
                         memcpy(am, amap, sizeof(am)); memcpy(bm, bmap, sizeof(bm));
+                        aa = a->insn[i].ac;
+                        ba = b->insn[j].ac;
+                        if (aa != ba &&
+                            (((a->renameable >> aa) & 1UL) == 0 ||
+                            ((b->renameable >> ba) & 1UL) == 0))
+                                continue;
                         if (!mapped_insn_equal(&a->insn[i], &b->insn[j],
                             am, bm)) continue;
                         if (common_rename_rec(a, b, ap, bp,
@@ -804,6 +901,22 @@ main(int argc, char **argv)
                         for (x = 0; x < na; x++)
                                 for (y = (bi == ai ? x + 1 : 0);
                                     y < nb; y++) {
+                                        unsigned long its = 0, ifs = 0;
+                                        unsigned long iscore =
+                                            inverted_jump_suffix_score(
+                                            &in[ai].obj, &ab[x], ab, na,
+                                            &in[bi].obj, &bb[y], bb, nb,
+                                            &its, &ifs);
+                                        if (iscore >= 3 &&
+                                            (its >= 2 || ifs >= 2))
+                                                fprintf(stderr,
+                                                    "CFG-INVERT-SUFFIX "
+                                                    "%s+%06lo <=> %s+%06lo : "
+                                                    "TAKEN %lu FALL %lu "
+                                                    "SCORE %lu\n",
+                                                    in[ai].name, ab[x].start,
+                                                    in[bi].name, bb[y].start,
+                                                    its, ifs, iscore);
                                         if (inverted_jump_blocks(
                                             &in[ai].obj, &ab[x], ab, na,
                                             &in[bi].obj, &bb[y], bb, nb))
@@ -897,6 +1010,16 @@ main(int argc, char **argv)
                                     start + len < in[ai].obj.text_words &&
                                     unconditional_end_word(
                                         in[ai].obj.text[start + len]);
+                                r[nr].renameable = 0;
+                                {
+                                        unsigned int ac;
+                                        for (ac = 1; ac < 15; ac++)
+                                                if (ac_local_to_region(
+                                                    &in[ai].obj, start, len,
+                                                    ac))
+                                                        r[nr].renameable |=
+                                                            1UL << ac;
+                                }
                                 memcpy(r[nr].insn, v,
                                     (size_t)len * sizeof(v[0]));
                                 nr++;
