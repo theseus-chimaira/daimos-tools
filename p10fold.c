@@ -12,6 +12,18 @@ struct input {
         const struct dobj_reloc **reloc_at;
 };
 
+struct occurrence {
+        int input;
+        unsigned long off;
+};
+
+struct group {
+        unsigned long words;
+        struct occurrence *occ;
+        unsigned long count;
+        unsigned long cap;
+};
+
 static void
 usage(void)
 {
@@ -157,11 +169,133 @@ static int
 isolated_block(const struct input *in, unsigned long off,
     unsigned long words)
 {
+        unsigned long i;
+
         if (words == 0UL)
                 return 0;
         if (off != 0UL && !unconditional_end(in, off - 1UL))
                 return 0;
-        return unconditional_end(in, off + words - 1UL);
+        if (!unconditional_end(in, off + words - 1UL))
+                return 0;
+        /*
+         * A removed copy must have a single legal entry.  Reject labels and
+         * local TEXT relocations into its interior; otherwise some control
+         * path could bypass the entry we intend to retarget.
+         */
+        for (i = 0UL; i < in->obj.symbol_count; i++) {
+                const struct dobj_symbol *s = &in->obj.symbols[i];
+
+                if (s->kind == DOBJ_SYM_DEF && s->sec == DOBJ_SEC_TEXT &&
+                    s->value.rh > off && s->value.rh < off + words)
+                        return 0;
+        }
+        for (i = 0UL; i < in->obj.reloc_count; i++) {
+                const struct dobj_reloc *r = &in->obj.relocs[i];
+
+                if ((r->type == DOBJ_RELOC_LOCAL_RH18 ||
+                    r->type == DOBJ_RELOC_LOCAL_LH18) &&
+                    r->target_sec == DOBJ_SEC_TEXT &&
+                    r->addend.rh > off && r->addend.rh < off + words &&
+                    (r->loc_sec != DOBJ_SEC_TEXT || r->offset < off ||
+                    r->offset >= off + words))
+                        return 0;
+        }
+        return 1;
+}
+
+static int
+same_occurrence(const struct occurrence *a, const struct occurrence *b)
+{
+        return a->input == b->input && a->off == b->off;
+}
+
+static int
+group_add(struct group *g, int input, unsigned long off)
+{
+        struct occurrence o;
+        unsigned long i;
+
+        o.input = input;
+        o.off = off;
+        for (i = 0UL; i < g->count; i++)
+                if (same_occurrence(&g->occ[i], &o))
+                        return 0;
+        if (g->count == g->cap) {
+                unsigned long cap = g->cap ? g->cap * 2UL : 4UL;
+                struct occurrence *p = (struct occurrence *)realloc(g->occ,
+                    (size_t)cap * sizeof(*p));
+
+                if (p == NULL)
+                        return -1;
+                g->occ = p;
+                g->cap = cap;
+        }
+        g->occ[g->count++] = o;
+        return 0;
+}
+
+static int
+group_equivalent(const struct group *g, const struct input *inputs,
+    int ai, unsigned long ao, int bi, unsigned long bo, unsigned long words)
+{
+        if (g->words != words || g->count == 0UL)
+                return 0;
+        return range_equal(&inputs[g->occ[0].input], g->occ[0].off,
+            &inputs[ai], ao, words) &&
+            range_equal(&inputs[g->occ[0].input], g->occ[0].off,
+            &inputs[bi], bo, words);
+}
+
+static int
+add_zero_group(struct group **groupsp, unsigned long *countp,
+    unsigned long *capp, const struct input *inputs, int ai, unsigned long ao,
+    int bi, unsigned long bo, unsigned long words)
+{
+        struct group *groups = *groupsp;
+        unsigned long i;
+
+        for (i = 0UL; i < *countp; i++) {
+                if (!group_equivalent(&groups[i], inputs, ai, ao, bi, bo,
+                    words))
+                        continue;
+                if (group_add(&groups[i], ai, ao) != 0 ||
+                    group_add(&groups[i], bi, bo) != 0)
+                        return -1;
+                return 0;
+        }
+        if (*countp == *capp) {
+                unsigned long cap = *capp ? *capp * 2UL : 16UL;
+                struct group *p = (struct group *)realloc(groups,
+                    (size_t)cap * sizeof(*p));
+
+                if (p == NULL)
+                        return -1;
+                groups = p;
+                *groupsp = groups;
+                *capp = cap;
+        }
+        memset(&groups[*countp], 0, sizeof(groups[*countp]));
+        groups[*countp].words = words;
+        if (group_add(&groups[*countp], ai, ao) != 0 ||
+            group_add(&groups[*countp], bi, bo) != 0)
+                return -1;
+        (*countp)++;
+        return 0;
+}
+
+static int
+group_cmp(const void *av, const void *bv)
+{
+        const struct group *a = (const struct group *)av;
+        const struct group *b = (const struct group *)bv;
+        unsigned long asave = a->words * (a->count - 1UL);
+        unsigned long bsave = b->words * (b->count - 1UL);
+
+        if (asave < bsave)
+                return 1;
+        if (asave > bsave)
+                return -1;
+        return 0;
 }
 
 static int
@@ -233,6 +367,9 @@ main(int argc, char **argv)
         unsigned long whole_words = 0UL;
         unsigned long zero_cost_candidates = 0UL;
         unsigned long one_jump_candidates = 0UL;
+        struct group *groups = NULL;
+        unsigned long group_count = 0UL;
+        unsigned long group_cap = 0UL;
         int first = 1;
         int count;
         int ai;
@@ -333,6 +470,14 @@ main(int argc, char **argv)
                                         if (whole || zero_block) {
                                                 whole_words += n;
                                                 zero_cost_candidates++;
+                                                if (add_zero_group(&groups,
+                                                    &group_count, &group_cap,
+                                                    inputs, ai, ao, bi, bo,
+                                                    n) != 0) {
+                                                        fprintf(stderr,
+                                                            "p10fold: out of memory\n");
+                                                        return 1;
+                                                }
                                         } else {
                                                 one_jump_candidates++;
                                         }
@@ -348,6 +493,73 @@ main(int argc, char **argv)
         printf("RUNS MAY OVERLAP; RUN LENGTHS ARE NOT ADDITIVE SAVINGS.\n");
         printf("PAIR_NET ASSUMES ONE DUPLICATE COPY IS REPLACED; "
             "IT IS NOT AN ADDITIVE TOTAL.\n");
+        if (group_count != 0UL) {
+                unsigned char **used;
+                unsigned long accepted = 0UL;
+                unsigned long saved = 0UL;
+                unsigned long gi;
+
+                used = (unsigned char **)calloc((size_t)count, sizeof(*used));
+                if (used == NULL)
+                        return 1;
+                for (ai = 0; ai < count; ai++) {
+                        used[ai] = (unsigned char *)calloc(
+                            (size_t)inputs[ai].obj.text_words, 1U);
+                        if (used[ai] == NULL)
+                                return 1;
+                }
+                qsort(groups, (size_t)group_count, sizeof(*groups), group_cmp);
+                printf("\nZERO-COST EQUIVALENCE GROUPS "
+                    "(GREEDY NON-OVERLAPPING):\n");
+                for (gi = 0UL; gi < group_count; gi++) {
+                        struct group *g = &groups[gi];
+                        unsigned long oi;
+                        unsigned long usable = 0UL;
+                        int blocked = 0;
+
+                        for (oi = 0UL; oi < g->count; oi++) {
+                                unsigned long j;
+                                struct occurrence *o = &g->occ[oi];
+                                int occ_blocked = 0;
+
+                                for (j = 0UL; j < g->words; j++)
+                                        if (used[o->input][o->off + j])
+                                                occ_blocked = 1;
+                                if (occ_blocked)
+                                        blocked = 1;
+                                else
+                                        usable++;
+                        }
+                        if (blocked || usable < 2UL)
+                                continue;
+                        printf("GROUP %lu: %lu WORDS x %lu COPIES; SAVE %lu\n",
+                            accepted + 1UL, g->words, g->count,
+                            g->words * (g->count - 1UL));
+                        for (oi = 0UL; oi < g->count; oi++) {
+                                unsigned long j;
+                                struct occurrence *o = &g->occ[oi];
+                                const char *s = symbol_at(&inputs[o->input],
+                                    o->off);
+
+                                printf("  %s+%06lo%s%s%s\n",
+                                    inputs[o->input].name, o->off,
+                                    s ? " (" : "", s ? s : "",
+                                    s ? ")" : "");
+                                for (j = 0UL; j < g->words; j++)
+                                        used[o->input][o->off + j] = 1U;
+                        }
+                        saved += g->words * (g->count - 1UL);
+                        accepted++;
+                }
+                printf("ZERO-COST NON-OVERLAPPING TOTAL: %lu GROUPS; "
+                    "%lu WORDS SAVED\n", accepted, saved);
+                for (ai = 0; ai < count; ai++)
+                        free(used[ai]);
+                free(used);
+        }
+        for (ai = 0; ai < (int)group_count; ai++)
+                free(groups[ai].occ);
+        free(groups);
         for (ai = 0; ai < count; ai++)
                 free_input(&inputs[ai]);
         free(inputs);
