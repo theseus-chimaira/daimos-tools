@@ -6,6 +6,7 @@
 #include <string.h>
 
 #define WORD_MASK 0777777777777ULL
+#define MTC_RECORD_BYTES 32766U
 
 static void
 put32(FILE *f, unsigned long v)
@@ -38,6 +39,20 @@ mtc_odd_parity_v1(unsigned char value)
         if ((ones & 1U) == 0U)
                 value |= 0100U;
         return value;
+}
+
+static int
+write_record(FILE *out, const unsigned char *data, size_t used)
+{
+        if (used == 0U)
+                return 0;
+        put32(out, (unsigned long)used);
+        if (fwrite(data, 1, used, out) != used)
+                return -1;
+        if ((used & 1U) != 0U && fputc(0, out) == EOF)
+                return -1;
+        put32(out, (unsigned long)used);
+        return 0;
 }
 
 static unsigned long long
@@ -80,14 +95,14 @@ main(int argc, char **argv)
 {
         const char *type, *payload, *out_path;
         FILE *in, *out;
-        unsigned char *data, *new_data;
-        size_t used, cap;
+        unsigned char *data;
+        size_t used;
         char line[256];
         int i;
 
         type = payload = out_path = NULL;
         data = NULL;
-        used = cap = 0;
+        used = 0U;
         for (i = 1; i < argc; i++) {
                 if (strcmp(argv[i], "-t") == 0 && i + 1 < argc)
                         type = argv[++i];
@@ -106,6 +121,19 @@ main(int argc, char **argv)
                 perror(payload);
                 return 1;
         }
+        out = fopen(out_path, "wb");
+        if (out == NULL) {
+                perror(out_path);
+                fclose(in);
+                return 1;
+        }
+        data = (unsigned char *)malloc(MTC_RECORD_BYTES);
+        if (data == NULL) {
+                perror("mktap: malloc");
+                fclose(in);
+                fclose(out);
+                return 1;
+        }
         while (fgets(line, sizeof(line), in) != NULL) {
                 unsigned long long w;
                 int ok;
@@ -119,22 +147,19 @@ main(int argc, char **argv)
                                 continue;
                         fprintf(stderr, "mktap: bad word: %s", line);
                         fclose(in);
+                        fclose(out);
                         free(data);
                         return 1;
                 }
-                if (used + 6 > cap) {
-                        size_t new_cap = cap ? cap * 2 : 1024;
-                        while (new_cap < used + 6)
-                                new_cap *= 2;
-                        new_data = (unsigned char *)realloc(data, new_cap);
-                        if (new_data == NULL) {
-                                perror("mktap: realloc");
+                if (used + 6U > MTC_RECORD_BYTES) {
+                        if (write_record(out, data, used) != 0) {
+                                perror("mktap: write");
                                 fclose(in);
+                                fclose(out);
                                 free(data);
                                 return 1;
                         }
-                        data = new_data;
-                        cap = new_cap;
+                        used = 0U;
                 }
                 data[used++] = mtc_odd_parity_v1((unsigned char)(w >> 30));
                 data[used++] = mtc_odd_parity_v1((unsigned char)(w >> 24));
@@ -144,23 +169,13 @@ main(int argc, char **argv)
                 data[used++] = mtc_odd_parity_v1((unsigned char)w);
         }
         fclose(in);
-
-        out = fopen(out_path, "wb");
-        if (out == NULL) {
-                perror(out_path);
-                free(data);
-                return 1;
-        }
-        put32(out, (unsigned long)used);
-        if (used != 0 && fwrite(data, 1, used, out) != used) {
+        if (write_record(out, data, used) != 0) {
                 perror("mktap: write");
                 fclose(out);
                 free(data);
                 return 1;
         }
-        if (used & 1)
-                fputc(0, out);
-        put32(out, (unsigned long)used);
+        /* One tape mark terminates the boot file after the final data record. */
         put32(out, 0);
         if (fclose(out) != 0) {
                 perror(out_path);
