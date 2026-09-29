@@ -15,6 +15,10 @@ results require a consistent AC renaming and are emitted only when each
 renamed AC is conservatively proven local to the compared region: its incoming
 value is killed before use and its outgoing value is killed before a later
 read. Unknown instructions and control-flow boundaries stop that proof.
+`CANON-ZERO` reports equal-cost normalization between an unlabelled
+`MOVEI AC,0` and `SETZ AC`; labelled/alternate-entry instructions are not
+rewritten. The peephole pass also reports strictly smaller PDP-10 forms such as
+`CAIN AC,0 ; JRST` -> `JUMPE` and increment/decrement plus jump -> AOJ/SOJ.
 Neither class is folded directly; changed source must still assemble and pass
 the exact relocation-aware `p10fold` checks.
 

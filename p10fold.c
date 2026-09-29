@@ -378,6 +378,7 @@ main(int argc, char **argv)
         unsigned long whole_words = 0UL;
         unsigned long zero_cost_candidates = 0UL;
         unsigned long one_jump_candidates = 0UL;
+        unsigned long address_sensitive_candidates = 0UL;
         struct group *groups = NULL;
         unsigned long group_count = 0UL;
         unsigned long group_cap = 0UL;
@@ -460,15 +461,22 @@ main(int argc, char **argv)
                                         const char *cost;
                                         unsigned long pair_net;
 
-                                        ar = whole ||
+                                        /*
+                                         * A named entry may have observable
+                                         * address identity.  It can anchor a
+                                         * fold, but do not remove/alias it in
+                                         * the strict zero-cost accounting.
+                                         */
+                                        ar = as == NULL &&
                                             isolated_block(&inputs[ai], ao, n);
-                                        br = whole ||
+                                        br = bs == NULL &&
                                             isolated_block(&inputs[bi], bo, n);
                                         zero_block = ar || br;
-                                        cost = (whole || zero_block) ?
-                                            "ZERO" : "ONE_JRST";
-                                        pair_net = (whole || zero_block) ?
-                                            n : n - 1UL;
+                                        cost = zero_block ? "ZERO" :
+                                            (whole ? "ADDRESS_ALIAS" :
+                                            "ONE_JRST");
+                                        pair_net = zero_block ? n :
+                                            (whole ? 0UL : n - 1UL);
                                         printf("%s %s+%06lo%s%s%s <=> "
                                             "%s+%06lo%s%s%s : %lu WORDS; "
                                             "COST=%s; PAIR_NET=%lu\n",
@@ -482,7 +490,7 @@ main(int argc, char **argv)
                                             bs ? ")" : "", n,
                                             cost, pair_net);
                                         candidates++;
-                                        if (whole || zero_block) {
+                                        if (zero_block) {
                                                 whole_words += n;
                                                 zero_cost_candidates++;
                                                 if (add_zero_group(&groups,
@@ -494,7 +502,10 @@ main(int argc, char **argv)
                                                         return 1;
                                                 }
                                         } else {
-                                                one_jump_candidates++;
+                                                if (whole)
+                                                        address_sensitive_candidates++;
+                                                else
+                                                        one_jump_candidates++;
                                         }
                                 }
                         }
@@ -503,8 +514,10 @@ main(int argc, char **argv)
         printf("\nSUMMARY: %lu CANDIDATES; %lu ZERO-COST CANDIDATE WORDS\n",
             candidates, whole_words);
         printf("COST CLASSES: %lu ZERO-EXECUTION-COST; "
+            "%lu ADDRESS-SENSITIVE WHOLE ENTRIES; "
             "%lu REQUIRE ONE EXTRA JRST PER FOLDED OCCURRENCE.\n",
-            zero_cost_candidates, one_jump_candidates);
+            zero_cost_candidates, address_sensitive_candidates,
+            one_jump_candidates);
         printf("RUNS MAY OVERLAP; RUN LENGTHS ARE NOT ADDITIVE SAVINGS.\n");
         printf("PAIR_NET ASSUMES ONE DUPLICATE COPY IS REPLACED; "
             "IT IS NOT AN ADDITIVE TOTAL.\n");

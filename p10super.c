@@ -385,6 +385,34 @@ insn_equal(const struct insn *a, const struct insn *b)
 }
 
 static int
+zero_form_equal(const struct insn *a, const struct insn *b)
+{
+        unsigned int aop, bop, aac, bac;
+
+        if (insn_equal(a, b))
+                return 1;
+        aop = (unsigned int)((a->word.lh >> 9) & 0777UL);
+        bop = (unsigned int)((b->word.lh >> 9) & 0777UL);
+        if (!((aop == 0201 && bop == 0400) ||
+            (aop == 0400 && bop == 0201)))
+                return 0;
+        if (a->word.rh != 0 || b->word.rh != 0 ||
+            (a->word.lh & 037UL) != 0 || (b->word.lh & 037UL) != 0 ||
+            half_reloc(a->obj, a->off, 0) != NULL ||
+            half_reloc(b->obj, b->off, 0) != NULL)
+                return 0;
+        aac = (unsigned int)((a->word.lh >> 5) & 017UL);
+        bac = (unsigned int)((b->word.lh >> 5) & 017UL);
+        if (aac != bac)
+                return 0;
+        if (aop == 0201 && has_text_entry(a->obj, a->off))
+                return 0;
+        if (bop == 0201 && has_text_entry(b->obj, b->off))
+                return 0;
+        return 1;
+}
+
+static int
 word_at_equal(const struct dobj_object *ao, unsigned long aoff,
     const struct dobj_object *bo, unsigned long boff)
 {
@@ -819,28 +847,19 @@ build_pred(const struct insn *v, unsigned long n, unsigned int pred[MAX_REGION])
 static int
 common_schedule_rec(const struct region *a, const struct region *b,
     const unsigned int ap[MAX_REGION], const unsigned int bp[MAX_REGION],
-    unsigned int adone, unsigned int bdone, unsigned long depth)
+    unsigned int adone, unsigned int bdone, unsigned long depth,
+    int (*equal)(const struct insn *, const struct insn *))
 {
         unsigned long i, j;
         if (depth == a->n) return 1;
         for (i = 0; i < a->n; i++) {
-                struct dobj_word aw;
                 if ((adone & (1U << i)) || (ap[i] & ~adone)) continue;
-                aw = a->insn[i].word;
                 for (j = 0; j < b->n; j++) {
-                        struct dobj_word bw;
                         if ((bdone & (1U << j)) || (bp[j] & ~bdone)) continue;
-                        bw = b->insn[j].word;
-                        /*
-                         * Compare opcode/address exactly here.  AC-renaming
-                         * search is a separate transformation and must not be
-                         * conflated with scheduling legality.
-                         */
-                        (void)aw;
-                        (void)bw;
-                        if (!insn_equal(&a->insn[i], &b->insn[j])) continue;
+                        if (!equal(&a->insn[i], &b->insn[j])) continue;
                         if (common_schedule_rec(a, b, ap, bp,
-                            adone | (1U << i), bdone | (1U << j), depth + 1))
+                            adone | (1U << i), bdone | (1U << j), depth + 1,
+                            equal))
                                 return 1;
                 }
         }
@@ -919,7 +938,18 @@ has_common_schedule(const struct region *a, const struct region *b)
         if (a->n != b->n) return 0;
         build_pred(a->insn, a->n, ap);
         build_pred(b->insn, b->n, bp);
-        return common_schedule_rec(a, b, ap, bp, 0, 0, 0);
+        return common_schedule_rec(a, b, ap, bp, 0, 0, 0, insn_equal);
+}
+
+static int
+has_common_zero_schedule(const struct region *a, const struct region *b)
+{
+        unsigned int ap[MAX_REGION], bp[MAX_REGION];
+        if (a->n != b->n) return 0;
+        build_pred(a->insn, a->n, ap);
+        build_pred(b->insn, b->n, bp);
+        return common_schedule_rec(a, b, ap, bp, 0, 0, 0,
+            zero_form_equal);
 }
 
 static int
@@ -937,6 +967,7 @@ main(int argc, char **argv)
         struct region *r = NULL;
         unsigned long nr = 0, cap = 0, matches = 0, words = 0;
         unsigned long sched_matches = 0, sched_words = 0;
+        unsigned long zero_matches = 0, zero_words = 0;
         unsigned long rename_matches = 0, rename_words = 0;
         unsigned long peephole_words = 0;
         int ni, ai;
@@ -1159,14 +1190,17 @@ main(int argc, char **argv)
         for (unsigned long i = 0; i < nr; i++)
                 for (unsigned long j = i + 1; j < nr; j++) {
                         int sched;
+                        int zero;
                         int renamed;
                         if (regions_overlap(&r[i], &r[j]) ||
                             r[i].n != r[j].n)
                                 continue;
                         sched = has_common_schedule(&r[i], &r[j]);
-                        renamed = !sched &&
+                        zero = !sched &&
+                            has_common_zero_schedule(&r[i], &r[j]);
+                        renamed = !sched && !zero &&
                             has_common_renamed_schedule(&r[i], &r[j]);
-                        if (!sched && !renamed) continue;
+                        if (!sched && !zero && !renamed) continue;
                         /* Ignore regions already byte-identical in source order. */
                         int identical = 1;
                         for (unsigned long k = 0; k < r[i].n; k++)
@@ -1179,12 +1213,15 @@ main(int argc, char **argv)
                         printf("%s%s %s+%06lo <=> %s+%06lo : %lu WORDS\n",
                             (r[i].tail_candidate && r[j].tail_candidate) ?
                                 "TAIL-" : "",
-                            sched ? "SCHEDULE" : "RENAME",
+                            sched ? "SCHEDULE" :
+                            (zero ? "CANON-ZERO" : "RENAME"),
                             in[r[i].input].name, r[i].off,
                             in[r[j].input].name, r[j].off, r[i].n);
                         matches++; words += r[i].n;
                         if (sched) {
                                 sched_matches++; sched_words += r[i].n;
+                        } else if (zero) {
+                                zero_matches++; zero_words += r[i].n;
                         } else {
                                 rename_matches++; rename_words += r[i].n;
                         }
@@ -1193,6 +1230,8 @@ main(int argc, char **argv)
             matches, words);
         printf("  SCHEDULE-ONLY: %lu MATCHES; %lu WORDS\n",
             sched_matches, sched_words);
+        printf("  ZERO-FORM-CANON: %lu MATCHES; %lu WORDS\n",
+            zero_matches, zero_words);
         printf("  AC-RENAME-DEPENDENT: %lu MATCHES; %lu WORDS\n",
             rename_matches, rename_words);
         printf("  PEEPHOLE-SHORTENING: %lu WORDS\n", peephole_words);
