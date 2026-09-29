@@ -41,7 +41,15 @@ struct region {
         unsigned long n;
         struct dobj_word canon[MAX_REGION];
         struct insn insn[MAX_REGION];
+        int tail_candidate;
 };
+
+static int
+unconditional_end_word(struct dobj_word w)
+{
+        unsigned long op = (w.lh >> 9) & 0777UL;
+        return op == 0254UL || op == 0263UL; /* JRST, POPJ */
+}
 
 static unsigned long
 canon_lh(struct dobj_word w, const unsigned int map[16])
@@ -415,29 +423,43 @@ main(int argc, char **argv)
                 fclose(f);
         }
         for (ai = 0; ai < ni; ai++) {
-                unsigned long p = 0;
-                while (p < in[ai].obj.text_words) {
+                unsigned long start;
+                for (start = 0; start < in[ai].obj.text_words; start++) {
                         struct insn v[MAX_REGION];
-                        unsigned long n = 0, start = p;
-                        while (p < in[ai].obj.text_words && n < MAX_REGION &&
-                            decode_safe(&in[ai].obj, p, &v[n])) {
-                                n++; p++;
-                        }
-                        if (n >= 2) {
+                        unsigned long n = 0, len;
+
+                        while (start + n < in[ai].obj.text_words &&
+                            n < MAX_REGION &&
+                            decode_safe(&in[ai].obj, start + n, &v[n]))
+                                n++;
+                        /*
+                         * Record every bounded prefix from this start point.
+                         * This turns discovery into a sliding-window search:
+                         * useful common subsequences are no longer hidden by
+                         * unrelated instructions at either end of a larger
+                         * analyzable region.
+                         */
+                        for (len = 2; len <= n; len++) {
                                 struct region *q;
                                 if (nr == cap) {
-                                        unsigned long nc = cap ? cap * 2 : 64;
+                                        unsigned long nc = cap ? cap * 2 : 256;
                                         q = realloc(r, (size_t)nc * sizeof(*r));
                                         if (q == NULL) return 1;
                                         r = q; cap = nc;
                                 }
-                                r[nr].input = ai; r[nr].off = start; r[nr].n = n;
-                                memcpy(r[nr].insn, v, (size_t)n * sizeof(v[0]));
-                                canonicalize(v, n, r[nr].canon);
-                                normalize_acs(r[nr].canon, n);
+                                r[nr].input = ai;
+                                r[nr].off = start;
+                                r[nr].n = len;
+                                r[nr].tail_candidate =
+                                    start + len < in[ai].obj.text_words &&
+                                    unconditional_end_word(
+                                        in[ai].obj.text[start + len]);
+                                memcpy(r[nr].insn, v,
+                                    (size_t)len * sizeof(v[0]));
+                                canonicalize(v, len, r[nr].canon);
+                                normalize_acs(r[nr].canon, len);
                                 nr++;
                         }
-                        if (p == start) p++;
                 }
         }
         for (unsigned long i = 0; i < nr; i++)
@@ -459,7 +481,9 @@ main(int argc, char **argv)
                                     in[r[j].input].obj.text[r[j].off+k]) != 0)
                                         identical = 0;
                         if (identical) continue;
-                        printf("%s %s+%06lo <=> %s+%06lo : %lu WORDS\n",
+                        printf("%s%s %s+%06lo <=> %s+%06lo : %lu WORDS\n",
+                            (r[i].tail_candidate && r[j].tail_candidate) ?
+                                "TAIL-" : "",
                             sched ? "SCHEDULE" : "RENAME",
                             in[r[i].input].name, r[i].off,
                             in[r[j].input].name, r[j].off, r[i].n);
