@@ -256,6 +256,70 @@ rh_reloc(const struct dobj_object *o, unsigned long off)
 }
 
 static int
+cai0_jrst_replacement(const struct dobj_object *o, unsigned long off,
+    unsigned int *replacement)
+{
+        unsigned int op, nextop;
+        if (off + 1 >= o->text_words || rh_reloc(o, off) != NULL)
+                return 0;
+        op = (unsigned int)((o->text[off].lh >> 9) & 0777UL);
+        nextop = (unsigned int)((o->text[off + 1].lh >> 9) & 0777UL);
+        if (op < 0301 || op > 0307 || o->text[off].rh != 0 ||
+            nextop != 0254)
+                return 0;
+        /*
+         * CAIx AC,0 skips the JRST when condition x is true.  A single
+         * JUMP with the complementary condition therefore has identical
+         * control flow.  PDP-10 condition complements differ by bit 04.
+         */
+        *replacement = 0320U + (((op - 0300U) ^ 04U) & 07U);
+        return 1;
+}
+
+static int
+incdec_jump_replacement(const struct dobj_object *o, unsigned long off,
+    unsigned int *replacement)
+{
+        unsigned long lh, nlh;
+        unsigned int op, nop, ac, nac;
+
+        if (off + 1 >= o->text_words || rh_reloc(o, off) != NULL)
+                return 0;
+        lh = o->text[off].lh;
+        nlh = o->text[off + 1].lh;
+        op = (unsigned int)((lh >> 9) & 0777UL);
+        nop = (unsigned int)((nlh >> 9) & 0777UL);
+        ac = (unsigned int)((lh >> 5) & 017UL);
+        nac = (unsigned int)((nlh >> 5) & 017UL);
+        if ((op != 0271 && op != 0275) || o->text[off].rh != 1 ||
+            (lh & 037UL) != 0 || nop < 0321 || nop > 0327 || ac != nac)
+                return 0;
+        *replacement = (op == 0271 ? 0340U : 0360U) + (nop - 0320U);
+        return 1;
+}
+
+static int
+incdec_jrst_replacement(const struct dobj_object *o, unsigned long off,
+    unsigned int *replacement)
+{
+        unsigned long lh, nlh;
+        unsigned int op, nop, nac;
+
+        if (off + 1 >= o->text_words || rh_reloc(o, off) != NULL)
+                return 0;
+        lh = o->text[off].lh;
+        nlh = o->text[off + 1].lh;
+        op = (unsigned int)((lh >> 9) & 0777UL);
+        nop = (unsigned int)((nlh >> 9) & 0777UL);
+        nac = (unsigned int)((nlh >> 5) & 017UL);
+        if ((op != 0271 && op != 0275) || o->text[off].rh != 1 ||
+            (lh & 037UL) != 0 || nop != 0254 || nac != 0)
+                return 0;
+        *replacement = op == 0271 ? 0344U : 0364U; /* AOJA / SOJA */
+        return 1;
+}
+
+static int
 reloc_equal(const struct dobj_object *ao, unsigned long aoff,
     const struct dobj_object *bo, unsigned long boff, int left)
 {
@@ -851,6 +915,7 @@ main(int argc, char **argv)
         unsigned long nr = 0, cap = 0, matches = 0, words = 0;
         unsigned long sched_matches = 0, sched_words = 0;
         unsigned long rename_matches = 0, rename_words = 0;
+        unsigned long peephole_words = 0;
         int ni, ai;
 
         if (argc < 2) {
@@ -871,6 +936,48 @@ main(int argc, char **argv)
                         return 1;
                 }
                 fclose(f);
+        }
+        for (ai = 0; ai < ni; ai++) {
+                unsigned long off;
+                for (off = 0; off < in[ai].obj.text_words; off++) {
+                        unsigned int replacement;
+                        if (!cai0_jrst_replacement(&in[ai].obj, off,
+                            &replacement))
+                                replacement = 0;
+                        else {
+                                fprintf(stderr,
+                                    "PEEP-CAI0-JRST %s+%06lo : SAVE 1; "
+                                    "JUMP OP %03o\n",
+                                    in[ai].name, off, replacement);
+                                peephole_words++;
+                        }
+                        if (incdec_jump_replacement(&in[ai].obj, off,
+                            &replacement)) {
+                                fprintf(stderr,
+                                    "PEEP-%sI1-JUMP %s+%06lo : SAVE 1; "
+                                    "%s OP %03o\n",
+                                    (((in[ai].obj.text[off].lh >> 9) &
+                                    0777UL) == 0271UL) ? "ADD" : "SUB",
+                                    in[ai].name, off,
+                                    (((in[ai].obj.text[off].lh >> 9) &
+                                    0777UL) == 0271UL) ? "AOJ" : "SOJ",
+                                    replacement);
+                                peephole_words++;
+                        }
+                        if (incdec_jrst_replacement(&in[ai].obj, off,
+                            &replacement)) {
+                                fprintf(stderr,
+                                    "PEEP-%sI1-JRST %s+%06lo : SAVE 1; "
+                                    "%sA OP %03o\n",
+                                    (((in[ai].obj.text[off].lh >> 9) &
+                                    0777UL) == 0271UL) ? "ADD" : "SUB",
+                                    in[ai].name, off,
+                                    (((in[ai].obj.text[off].lh >> 9) &
+                                    0777UL) == 0271UL) ? "AOJ" : "SOJ",
+                                    replacement);
+                                peephole_words++;
+                        }
+                }
         }
         for (ai = 0; ai < ni; ai++) {
                 struct block *blocks = NULL;
@@ -1065,6 +1172,7 @@ main(int argc, char **argv)
             sched_matches, sched_words);
         printf("  AC-RENAME-DEPENDENT: %lu MATCHES; %lu WORDS\n",
             rename_matches, rename_words);
+        printf("  PEEPHOLE-SHORTENING: %lu WORDS\n", peephole_words);
         for (ai = 0; ai < ni; ai++) dobj_free(&in[ai].obj);
         free(r); free(in);
         return 0;
