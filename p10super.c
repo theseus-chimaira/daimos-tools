@@ -624,6 +624,43 @@ block_shape_equal(const struct dobj_object *ao, const struct block *a,
         return 1;
 }
 
+/*
+ * Return 1 for the same successor orientation, 2 when the blocks differ
+ * only by an invertible terminal JUMP/AOJ/SOJ condition and therefore have
+ * equivalent semantics with their two successors exchanged.
+ */
+static int
+block_shape_relation(const struct dobj_object *ao, const struct block *a,
+    const struct dobj_object *bo, const struct block *b)
+{
+        unsigned long i, n;
+        unsigned long opmask = 0777UL << 9;
+        unsigned int aop, bop;
+
+        if (block_shape_equal(ao, a, bo, b))
+                return 1;
+        n = a->end - a->start;
+        if (n == 0 || n != b->end - b->start ||
+            a->nsucc != 2 || b->nsucc != 2 ||
+            !is_invertible_jump(ao->text[a->end - 1]) ||
+            !is_invertible_jump(bo->text[b->end - 1]))
+                return 0;
+        for (i = 0; i + 1 < n; i++)
+                if (!word_at_equal(ao, a->start + i, bo, b->start + i))
+                        return 0;
+        aop = (unsigned int)
+            ((ao->text[a->end - 1].lh >> 9) & 0777UL);
+        bop = (unsigned int)
+            ((bo->text[b->end - 1].lh >> 9) & 0777UL);
+        if ((aop ^ 04U) != bop ||
+            (ao->text[a->end - 1].lh & ~opmask) !=
+            (bo->text[b->end - 1].lh & ~opmask) ||
+            !local_control_target(ao, a->end - 1) ||
+            !local_control_target(bo, b->end - 1))
+                return 0;
+        return 2;
+}
+
 struct cfg_seen {
         const struct block *a;
         const struct block *b;
@@ -638,6 +675,7 @@ cfg_shape_score_rec(const struct dobj_object *ao, const struct block *a,
     int *closed)
 {
         unsigned long score, i;
+        int relation;
 
         if (same_block_occurrence(ao, a, bo, b))
                 return 0;
@@ -645,7 +683,8 @@ cfg_shape_score_rec(const struct dobj_object *ao, const struct block *a,
                 *closed = 0;
                 return 0;
         }
-        if (!block_shape_equal(ao, a, bo, b) || a->nsucc != b->nsucc) {
+        relation = block_shape_relation(ao, a, bo, b);
+        if (relation == 0 || a->nsucc != b->nsucc) {
                 *closed = 0;
                 return 0;
         }
@@ -662,8 +701,9 @@ cfg_shape_score_rec(const struct dobj_object *ao, const struct block *a,
         score = a->end - a->start;
         (*blocks)++;
         for (i = 0; i < a->nsucc; i++) {
+                unsigned long bj = relation == 2 ? 1UL - i : i;
                 const struct block *as = block_at(ab, na, a->succ[i]);
-                const struct block *bs = block_at(bb, nb, b->succ[i]);
+                const struct block *bs = block_at(bb, nb, b->succ[bj]);
                 if (as == NULL || bs == NULL) {
                         if (as != bs)
                                 *closed = 0;
@@ -671,7 +711,7 @@ cfg_shape_score_rec(const struct dobj_object *ao, const struct block *a,
                 }
                 if (same_block_occurrence(ao, as, bo, bs))
                         continue;
-                if (!block_shape_equal(ao, as, bo, bs) ||
+                if (block_shape_relation(ao, as, bo, bs) == 0 ||
                     as->nsucc != bs->nsucc) {
                         *closed = 0;
                         continue;

@@ -205,6 +205,18 @@ isolated_block(const struct input *in, unsigned long off,
 }
 
 static int
+removable_block(const struct input *in, unsigned long off,
+    unsigned long words)
+{
+        /*
+         * Keep named entries address-stable.  Unnamed isolated blocks may be
+         * removed by retargeting their existing incoming transfers.
+         */
+        return symbol_at(in, off) == NULL &&
+            isolated_block(in, off, words);
+}
+
+static int
 same_occurrence(const struct occurrence *a, const struct occurrence *b)
 {
         return a->input == b->input && a->off == b->off;
@@ -391,7 +403,7 @@ main(int argc, char **argv)
                 char *end;
 
                 min_words = strtoul(argv[2], &end, 0);
-                if (*argv[2] == '\0' || *end != '\0' || min_words < 2UL) {
+                if (*argv[2] == '\0' || *end != '\0' || min_words < 1UL) {
                         usage();
                         return 2;
                 }
@@ -467,10 +479,10 @@ main(int argc, char **argv)
                                          * fold, but do not remove/alias it in
                                          * the strict zero-cost accounting.
                                          */
-                                        ar = as == NULL &&
-                                            isolated_block(&inputs[ai], ao, n);
-                                        br = bs == NULL &&
-                                            isolated_block(&inputs[bi], bo, n);
+                                        ar = removable_block(
+                                            &inputs[ai], ao, n);
+                                        br = removable_block(
+                                            &inputs[bi], bo, n);
                                         zero_block = ar || br;
                                         cost = zero_block ? "ZERO" :
                                             (whole ? "ADDRESS_ALIAS" :
@@ -506,6 +518,63 @@ main(int argc, char **argv)
                                                         address_sensitive_candidates++;
                                                 else
                                                         one_jump_candidates++;
+                                        }
+
+                                        /*
+                                         * The maximal duplicate run need not
+                                         * itself be removable.  A shorter
+                                         * aligned subrun may start/end on
+                                         * legal transfer boundaries.  Add
+                                         * those exact subruns to the fold
+                                         * groups as well so the chosen
+                                         * minimum length cannot hide a valid
+                                         * zero-cost fold.
+                                         */
+                                        {
+                                                unsigned long suboff;
+                                                for (suboff = 0UL;
+                                                    suboff + min_words <= n;
+                                                    suboff++) {
+                                                        unsigned long subn;
+                                                        for (subn = min_words;
+                                                            suboff + subn <= n;
+                                                            subn++) {
+                                                                int sar, sbr;
+                                                                if (suboff == 0UL &&
+                                                                    subn == n)
+                                                                        continue;
+                                                                if (!range_equal(
+                                                                    &inputs[ai],
+                                                                    ao + suboff,
+                                                                    &inputs[bi],
+                                                                    bo + suboff,
+                                                                    subn))
+                                                                        continue;
+                                                                sar = removable_block(
+                                                                    &inputs[ai],
+                                                                    ao + suboff,
+                                                                    subn);
+                                                                sbr = removable_block(
+                                                                    &inputs[bi],
+                                                                    bo + suboff,
+                                                                    subn);
+                                                                if (!sar && !sbr)
+                                                                        continue;
+                                                                if (add_zero_group(
+                                                                    &groups,
+                                                                    &group_count,
+                                                                    &group_cap,
+                                                                    inputs, ai,
+                                                                    ao + suboff,
+                                                                    sar, bi,
+                                                                    bo + suboff,
+                                                                    sbr, subn) != 0) {
+                                                                        fprintf(stderr,
+                                                                            "p10fold: out of memory\n");
+                                                                        return 1;
+                                                                }
+                                                        }
+                                                }
                                         }
                                 }
                         }

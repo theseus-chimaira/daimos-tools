@@ -19,8 +19,15 @@ read. Unknown instructions and control-flow boundaries stop that proof.
 `MOVEI AC,0` and `SETZ AC`; labelled/alternate-entry instructions are not
 rewritten. The peephole pass also reports strictly smaller PDP-10 forms such as
 `CAIN AC,0 ; JRST` -> `JUMPE` and increment/decrement plus jump -> AOJ/SOJ.
-Neither class is folded directly; changed source must still assemble and pass
-the exact relocation-aware `p10fold` checks.
+CFG comparison also recognizes equivalent subgraphs whose terminal
+JUMP/AOJ/SOJ conditions are complementary and whose successors are therefore
+exchanged. Neither advisory class is folded directly; changed source must still
+assemble and pass the exact relocation-aware `p10fold` checks.
+
+`p10fold` searches exact relocation-aware duplicate text. Its zero-cost
+accounting distinguishes removable unnamed donor blocks from address-stable
+anchors and also considers aligned removable subruns inside longer duplicate
+runs, so a non-removable maximal match does not hide a legal shorter fold.
 
 THE DAS ASSEMBLER AND THE TEST SUITES ARE MAINTAINED IN SEPARATE PROJECTS.
 
