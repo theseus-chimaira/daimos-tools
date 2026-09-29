@@ -134,6 +134,36 @@ next_symbol(const struct input *in, unsigned long off)
         return next;
 }
 
+static unsigned long
+opcode_at(const struct input *in, unsigned long off)
+{
+        return (in->obj.text[off].lh >> 9) & 0777UL;
+}
+
+static int
+unconditional_end(const struct input *in, unsigned long off)
+{
+        unsigned long op = opcode_at(in, off);
+
+        /*
+         * JRST and POPJ end the current sequential path.  Keep this list
+         * deliberately short: a missed opportunity is preferable to calling
+         * a conditional or skip-dependent path free.
+         */
+        return op == 0254UL || op == 0263UL;
+}
+
+static int
+isolated_block(const struct input *in, unsigned long off,
+    unsigned long words)
+{
+        if (words == 0UL)
+                return 0;
+        if (off != 0UL && !unconditional_end(in, off - 1UL))
+                return 0;
+        return unconditional_end(in, off + words - 1UL);
+}
+
 static int
 load_input(struct input *in, const char *name)
 {
@@ -201,6 +231,8 @@ main(int argc, char **argv)
         unsigned long min_words = DEFAULT_MIN_WORDS;
         unsigned long candidates = 0UL;
         unsigned long whole_words = 0UL;
+        unsigned long zero_cost_candidates = 0UL;
+        unsigned long one_jump_candidates = 0UL;
         int first = 1;
         int count;
         int ai;
@@ -274,25 +306,48 @@ main(int argc, char **argv)
                                         whole = as != NULL && bs != NULL &&
                                             next_symbol(&inputs[ai], ao) == ao + n &&
                                             next_symbol(&inputs[bi], bo) == bo + n;
+                                        int zero_block;
+                                        const char *cost;
+                                        unsigned long pair_net;
+
+                                        zero_block =
+                                            isolated_block(&inputs[ai], ao, n) &&
+                                            isolated_block(&inputs[bi], bo, n);
+                                        cost = (whole || zero_block) ?
+                                            "ZERO" : "ONE_JRST";
+                                        pair_net = (whole || zero_block) ?
+                                            n : n - 1UL;
                                         printf("%s %s+%06lo%s%s%s <=> "
-                                            "%s+%06lo%s%s%s : %lu WORDS\n",
-                                            whole ? "WHOLE" : "RUN  ",
+                                            "%s+%06lo%s%s%s : %lu WORDS; "
+                                            "COST=%s; PAIR_NET=%lu\n",
+                                            whole ? "WHOLE" :
+                                            (zero_block ? "BLOCK" : "RUN  "),
                                             inputs[ai].name, ao,
                                             as ? " (" : "", as ? as : "",
                                             as ? ")" : "",
                                             inputs[bi].name, bo,
                                             bs ? " (" : "", bs ? bs : "",
-                                            bs ? ")" : "", n);
+                                            bs ? ")" : "", n,
+                                            cost, pair_net);
                                         candidates++;
-                                        if (whole)
+                                        if (whole || zero_block) {
                                                 whole_words += n;
+                                                zero_cost_candidates++;
+                                        } else {
+                                                one_jump_candidates++;
+                                        }
                                 }
                         }
                 }
         }
-        printf("\nSUMMARY: %lu CANDIDATES; %lu WHOLE-SYMBOL WORDS\n",
+        printf("\nSUMMARY: %lu CANDIDATES; %lu ZERO-COST CANDIDATE WORDS\n",
             candidates, whole_words);
+        printf("COST CLASSES: %lu ZERO-EXECUTION-COST; "
+            "%lu REQUIRE ONE EXTRA JRST PER FOLDED OCCURRENCE.\n",
+            zero_cost_candidates, one_jump_candidates);
         printf("RUNS MAY OVERLAP; RUN LENGTHS ARE NOT ADDITIVE SAVINGS.\n");
+        printf("PAIR_NET ASSUMES ONE DUPLICATE COPY IS REPLACED; "
+            "IT IS NOT AN ADDITIVE TOTAL.\n");
         for (ai = 0; ai < count; ai++)
                 free_input(&inputs[ai]);
         free(inputs);
