@@ -60,6 +60,15 @@ struct region {
         unsigned long renameable;
 };
 
+struct guard_shape {
+        const struct block *guard;
+        const struct block *taken;
+        const struct block *fall;
+        unsigned int family;
+        unsigned int condition;
+        unsigned long cond_off;
+};
+
 static int
 unconditional_end_word(struct dobj_word w)
 {
@@ -101,6 +110,16 @@ is_invertible_jump(struct dobj_word w)
         return (op >= 0321 && op <= 0327 && op != 0324) ||
             (op >= 0341 && op <= 0347 && op != 0344) ||
             (op >= 0361 && op <= 0367 && op != 0364);
+}
+
+static int
+compare_skip_family(unsigned int op)
+{
+        if (op >= 0301 && op <= 0307 && op != 0304)
+                return 0300; /* CAI */
+        if (op >= 0311 && op <= 0317 && op != 0314)
+                return 0310; /* CAM */
+        return 0;
 }
 
 static unsigned long
@@ -445,6 +464,104 @@ block_at(const struct block *b, unsigned long n, unsigned long start)
                 if (b[i].start == start)
                         return &b[i];
         return NULL;
+}
+
+static int same_block_occurrence(const struct dobj_object *,
+    const struct block *, const struct dobj_object *, const struct block *);
+
+static int
+compare_operand_equal(const struct dobj_object *ao, unsigned long aoff,
+    const struct dobj_object *bo, unsigned long boff)
+{
+        struct insn a, b;
+
+        memset(&a, 0, sizeof(a));
+        memset(&b, 0, sizeof(b));
+        a.word = ao->text[aoff]; a.obj = ao; a.off = aoff;
+        b.word = bo->text[boff]; b.obj = bo; b.off = boff;
+        /*
+         * Strip only the three condition bits.  The CAI/CAM family, AC,
+         * indirect/index mode and operand/relocation must still match.
+         */
+        a.word.lh &= ~(07UL << 9);
+        b.word.lh &= ~(07UL << 9);
+        return insn_equal(&a, &b);
+}
+
+static int
+guard_shape_at(const struct dobj_object *o, const struct block *g,
+    const struct block *blocks, unsigned long nb, struct guard_shape *out)
+{
+        unsigned long last;
+        unsigned int op, family;
+        const struct block *j, *fall, *taken;
+
+        if (g->end <= g->start || g->nsucc != 2)
+                return 0;
+        last = g->end - 1;
+        op = (unsigned int)((o->text[last].lh >> 9) & 0777UL);
+        family = (unsigned int)compare_skip_family(op);
+        if (family == 0)
+                return 0;
+        /*
+         * The non-skipped successor must be a private one-word JRST.
+         * Otherwise collapsing/reorienting the guard could affect another
+         * entry point.
+         */
+        j = block_at(blocks, nb, g->succ[0]);
+        fall = block_at(blocks, nb, g->succ[1]);
+        if (j == NULL || fall == NULL || j->end != j->start + 1 ||
+            ((o->text[j->start].lh >> 9) & 0777UL) != 0254UL ||
+            j->nsucc != 1 || has_text_entry(o, j->start))
+                return 0;
+        taken = block_at(blocks, nb, j->succ[0]);
+        if (taken == NULL)
+                return 0;
+        out->guard = g;
+        out->taken = taken;
+        out->fall = fall;
+        out->family = family;
+        /*
+         * CAI/CAM condition C skips the JRST when C is true, so the JRST
+         * target is reached on !C.  Complement conditions differ by bit 04.
+         */
+        out->condition = ((op - family) ^ 04U) & 07U;
+        out->cond_off = last;
+        return 1;
+}
+
+static unsigned long
+guard_suffix_score(const struct dobj_object *ao, const struct guard_shape *a,
+    const struct dobj_object *bo, const struct guard_shape *b,
+    unsigned long *taken_suffix, unsigned long *fall_suffix)
+{
+        unsigned long i, an;
+        const struct block *bt, *bf;
+
+        *taken_suffix = *fall_suffix = 0;
+        if (a->family != b->family ||
+            !compare_operand_equal(ao, a->cond_off, bo, b->cond_off))
+                return 0;
+        an = a->guard->end - a->guard->start;
+        if (an != b->guard->end - b->guard->start)
+                return 0;
+        for (i = 0; i + 1 < an; i++)
+                if (!word_at_equal(ao, a->guard->start + i,
+                    bo, b->guard->start + i))
+                        return 0;
+        bt = b->taken;
+        bf = b->fall;
+        if (a->condition == (b->condition ^ 04U)) {
+                bt = b->fall;
+                bf = b->taken;
+        } else if (a->condition != b->condition) {
+                return 0;
+        }
+        if (!same_block_occurrence(ao, a->taken, bo, bt))
+                *taken_suffix = common_block_suffix(ao, a->taken, bo, bt);
+        if (!same_block_occurrence(ao, a->fall, bo, bf))
+                *fall_suffix = common_block_suffix(ao, a->fall, bo, bf);
+        return *taken_suffix + *fall_suffix;
 }
 
 static int
@@ -1062,6 +1179,9 @@ main(int argc, char **argv)
                         for (x = 0; x < na; x++)
                                 for (y = (bi == ai ? x + 1 : 0);
                                     y < nb; y++) {
+                                        struct guard_shape ag, bg;
+                                        unsigned long gts = 0, gfs = 0;
+                                        unsigned long gscore = 0;
                                         unsigned long its = 0, ifs = 0;
                                         unsigned long iscore =
                                             inverted_jump_suffix_score(
@@ -1078,6 +1198,24 @@ main(int argc, char **argv)
                                                     in[ai].name, ab[x].start,
                                                     in[bi].name, bb[y].start,
                                                     its, ifs, iscore);
+                                        if (guard_shape_at(&in[ai].obj,
+                                            &ab[x], ab, na, &ag) &&
+                                            guard_shape_at(&in[bi].obj,
+                                            &bb[y], bb, nb, &bg))
+                                                gscore = guard_suffix_score(
+                                                    &in[ai].obj, &ag,
+                                                    &in[bi].obj, &bg,
+                                                    &gts, &gfs);
+                                        if (gscore >= 3 &&
+                                            (gts >= 2 || gfs >= 2))
+                                                fprintf(stderr,
+                                                    "CFG-GUARD-SUFFIX "
+                                                    "%s+%06lo <=> %s+%06lo : "
+                                                    "TAKEN %lu FALL %lu "
+                                                    "SCORE %lu\n",
+                                                    in[ai].name, ab[x].start,
+                                                    in[bi].name, bb[y].start,
+                                                    gts, gfs, gscore);
                                         if (inverted_jump_blocks(
                                             &in[ai].obj, &ab[x], ab, na,
                                             &in[bi].obj, &bb[y], bb, nb))
