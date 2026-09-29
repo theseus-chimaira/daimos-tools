@@ -73,7 +73,9 @@ is_skip_opcode(unsigned int op)
                 return (op & 07U) != 0;
         if (op >= 0600 && op <= 0677)
                 return (op & 07U) != 0;
-        if (op >= 0320 && op <= 0377)
+        if ((op >= 0330 && op <= 0337) || /* SKIP */
+            (op >= 0350 && op <= 0357) || /* AOS */
+            (op >= 0370 && op <= 0377))   /* SOS */
                 return (op & 07U) != 0;
         return 0;
 }
@@ -84,7 +86,9 @@ is_control_word(struct dobj_word w)
         unsigned int op = (unsigned int)((w.lh >> 9) & 0777UL);
         if (op == 0254 || op == 0263)
                 return 1;
-        if (op >= 0320 && op <= 0327) /* JUMP family */
+        if ((op >= 0320 && op <= 0327) || /* JUMP */
+            (op >= 0340 && op <= 0347) || /* AOJ */
+            (op >= 0360 && op <= 0367))   /* SOJ */
                 return 1;
         return is_skip_opcode(op);
 }
@@ -93,7 +97,9 @@ static int
 is_invertible_jump(struct dobj_word w)
 {
         unsigned int op = (unsigned int)((w.lh >> 9) & 0777UL);
-        return op >= 0321 && op <= 0327 && op != 0324;
+        return (op >= 0321 && op <= 0327 && op != 0324) ||
+            (op >= 0341 && op <= 0347 && op != 0344) ||
+            (op >= 0361 && op <= 0367 && op != 0364);
 }
 
 static unsigned long
@@ -124,9 +130,14 @@ build_blocks(const struct dobj_object *o, struct block **out)
                     r->addend.rh < o->text_words)
                         leader[r->addend.rh] = 1;
         }
-        for (i = 0; i + 1 < o->text_words; i++)
+        for (i = 0; i + 1 < o->text_words; i++) {
                 if (is_control_word(o->text[i]))
                         leader[i + 1] = 1;
+                if (is_skip_opcode((unsigned int)
+                    ((o->text[i].lh >> 9) & 0777UL)) &&
+                    i + 2 < o->text_words)
+                        leader[i + 2] = 1;
+        }
 
         for (i = 0; i < o->text_words; ) {
                 unsigned long end = i + 1;
@@ -169,7 +180,9 @@ build_blocks(const struct dobj_object *o, struct block **out)
                 if (op == 0254) { /* JRST */
                         if (target != NO_SUCC)
                                 b[i].succ[b[i].nsucc++] = target;
-                } else if (op >= 0320 && op <= 0327) { /* JUMP */
+                } else if ((op >= 0320 && op <= 0327) ||
+                    (op >= 0340 && op <= 0347) ||
+                    (op >= 0360 && op <= 0367)) {
                         if (target != NO_SUCC)
                                 b[i].succ[b[i].nsucc++] = target;
                         if (b[i].end < o->text_words && b[i].nsucc < 2)
@@ -198,7 +211,9 @@ build_blocks(const struct dobj_object *o, struct block **out)
                                         unsigned int op = (unsigned int)
                                             ((o->text[last].lh >> 9) & 0777UL);
                                         if ((op == 0254 ||
-                                            (op >= 0320 && op <= 0327)) &&
+                                            (op >= 0320 && op <= 0327) ||
+                                            (op >= 0340 && op <= 0347) ||
+                                            (op >= 0360 && op <= 0367)) &&
                                             b[i].succ[si] != b[i].end)
                                                 b[j].incoming_branch++;
                                         else
@@ -325,7 +340,10 @@ local_control_target(const struct dobj_object *o, unsigned long off)
             r->target_sec != DOBJ_SEC_TEXT)
                 return 0;
         op = (unsigned int)((o->text[off].lh >> 9) & 0777UL);
-        return op == 0254 || (op >= 0320 && op <= 0327);
+        return op == 0254 ||
+            (op >= 0320 && op <= 0327) ||
+            (op >= 0340 && op <= 0347) ||
+            (op >= 0360 && op <= 0367);
 }
 
 /*
@@ -441,7 +459,10 @@ branch_targets_offset(const struct dobj_object *o, unsigned long off)
                     r->addend.rh != off || r->offset >= o->text_words)
                         continue;
                 op = (unsigned int)((o->text[r->offset].lh >> 9) & 0777UL);
-                if (op == 0254 || (op >= 0320 && op <= 0327))
+                if (op == 0254 ||
+                    (op >= 0320 && op <= 0327) ||
+                    (op >= 0340 && op <= 0347) ||
+                    (op >= 0360 && op <= 0367))
                         n++;
         }
         return n;
