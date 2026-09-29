@@ -633,18 +633,28 @@ cfg_shape_score_rec(const struct dobj_object *ao, const struct block *a,
     const struct block *ab, unsigned long na,
     const struct dobj_object *bo, const struct block *b,
     const struct block *bb, unsigned long nb, unsigned int depth,
-    struct cfg_seen *seen, unsigned int nseen, unsigned int *blocks)
+    struct cfg_seen *seen, unsigned int nseen, unsigned int *blocks,
+    int *closed)
 {
         unsigned long score, i;
 
-        if (depth == 0 || same_block_occurrence(ao, a, bo, b) ||
-            !block_shape_equal(ao, a, bo, b) || a->nsucc != b->nsucc)
+        if (same_block_occurrence(ao, a, bo, b))
                 return 0;
+        if (depth == 0) {
+                *closed = 0;
+                return 0;
+        }
+        if (!block_shape_equal(ao, a, bo, b) || a->nsucc != b->nsucc) {
+                *closed = 0;
+                return 0;
+        }
         for (i = 0; i < nseen; i++)
                 if (seen[i].a == a && seen[i].b == b)
                         return 0;
-        if (nseen >= 8)
+        if (nseen >= 8) {
+                *closed = 0;
                 return 0;
+        }
         seen[nseen].a = a;
         seen[nseen].b = b;
         nseen++;
@@ -653,10 +663,20 @@ cfg_shape_score_rec(const struct dobj_object *ao, const struct block *a,
         for (i = 0; i < a->nsucc; i++) {
                 const struct block *as = block_at(ab, na, a->succ[i]);
                 const struct block *bs = block_at(bb, nb, b->succ[i]);
-                if (as == NULL || bs == NULL)
+                if (as == NULL || bs == NULL) {
+                        if (as != bs)
+                                *closed = 0;
                         continue;
+                }
+                if (same_block_occurrence(ao, as, bo, bs))
+                        continue;
+                if (!block_shape_equal(ao, as, bo, bs) ||
+                    as->nsucc != bs->nsucc) {
+                        *closed = 0;
+                        continue;
+                }
                 score += cfg_shape_score_rec(ao, as, ab, na,
-                    bo, bs, bb, nb, depth - 1, seen, nseen, blocks);
+                    bo, bs, bb, nb, depth - 1, seen, nseen, blocks, closed);
         }
         return score;
 }
@@ -665,12 +685,19 @@ static unsigned long
 cfg_shape_score(const struct dobj_object *ao, const struct block *a,
     const struct block *ab, unsigned long na,
     const struct dobj_object *bo, const struct block *b,
-    const struct block *bb, unsigned long nb, unsigned int *blocks)
+    const struct block *bb, unsigned long nb, unsigned int *blocks,
+    int *closed_out)
 {
         struct cfg_seen seen[8];
+        int closed = 1;
         *blocks = 0;
-        return cfg_shape_score_rec(ao, a, ab, na, bo, b, bb, nb,
-            4, seen, 0, blocks);
+        {
+                unsigned long score = cfg_shape_score_rec(
+                    ao, a, ab, na, bo, b, bb, nb,
+                    4, seen, 0, blocks, &closed);
+                *closed_out = closed;
+                return score;
+        }
 }
 
 static int
@@ -888,7 +915,8 @@ decode_safe(const struct dobj_object *o, unsigned long off, struct insn *d)
 
         switch (op) {
         case 0201: case 0205: case 0211: case 0215: /* MOVEI family */
-        case 0401: case 0475:                         /* SETZI/SETOI */
+        case 0400: case 0401:                         /* SETZ/SETZI */
+        case 0474: case 0475:                         /* SETO/SETOI */
         case 0501: case 0541: case 0551: case 0561: /* halfword I */
                 d->writes = bit;
                 return 1;
@@ -898,8 +926,8 @@ decode_safe(const struct dobj_object *o, unsigned long off, struct insn *d)
                 return 1;
         case 0431: /* XORI */
         case 0435: /* IORI */
-        case 0441: /* ANDI */
-        case 0471: /* EQVI */
+        case 0405: /* ANDI */
+        case 0445: /* EQVI */
                 d->reads = bit;
                 d->writes = bit;
                 return 1;
@@ -909,12 +937,16 @@ decode_safe(const struct dobj_object *o, unsigned long off, struct insn *d)
                 return 1;
         case 0200: case 0204: case 0210: case 0214: /* MOVE/MOVS/N/M */
         case 0270: case 0274:                         /* ADD/SUB */
+        case 0404: case 0430: case 0434: case 0444: /* AND/XOR/IOR/EQV */
         case 0500: case 0540: case 0550: case 0560: /* halfword reads */
         case 0510: case 0520: case 0530: case 0570: /* halfword Z reads */
                 if (!memory_id(o, off, &d->mem_kind, &d->mem_id))
                         return 0;
                 d->mem_read = 1;
-                if (op == 0270 || op == 0274) d->reads = bit;
+                if (op == 0270 || op == 0274 ||
+                    op == 0404 || op == 0430 ||
+                    op == 0434 || op == 0444)
+                        d->reads = bit;
                 d->writes = bit;
                 return 1;
         case 0202: case 0206: case 0212: case 0216: /* MOVE*M */
@@ -923,6 +955,30 @@ decode_safe(const struct dobj_object *o, unsigned long off, struct insn *d)
                         return 0;
                 d->mem_write = 1;
                 d->reads = bit;
+                return 1;
+        case 0402: case 0476: /* SETZM/SETOM */
+                if (!memory_id(o, off, &d->mem_kind, &d->mem_id))
+                        return 0;
+                d->mem_write = 1;
+                return 1;
+        case 0403: case 0477: /* SETZB/SETOB */
+                if (!memory_id(o, off, &d->mem_kind, &d->mem_id))
+                        return 0;
+                d->mem_write = 1;
+                d->writes = bit;
+                return 1;
+        case 0406: case 0432: case 0436: case 0446: /* ANDM/XORM/IORM/EQVM */
+                if (!memory_id(o, off, &d->mem_kind, &d->mem_id))
+                        return 0;
+                d->mem_read = d->mem_write = 1;
+                d->reads = bit;
+                return 1;
+        case 0407: case 0433: case 0437: case 0447: /* ANDB/XORB/IORB/EQVB */
+                if (!memory_id(o, off, &d->mem_kind, &d->mem_id))
+                        return 0;
+                d->mem_read = d->mem_write = 1;
+                d->reads = bit;
+                d->writes = bit;
                 return 1;
         /*
          * Comparison/test/skip instructions are useful structural anchors.
@@ -1291,21 +1347,24 @@ main(int argc, char **argv)
                                                     &in[ai].obj, &ab[x],
                                                     &in[bi].obj, &bb[y]);
                                                 unsigned int sblocks = 0;
+                                                int sclosed = 0;
                                                 unsigned long sscore =
                                                     cfg_shape_score(
                                                     &in[ai].obj, &ab[x],
                                                     ab, na, &in[bi].obj,
                                                     &bb[y], bb, nb,
-                                                    &sblocks);
+                                                    &sblocks, &sclosed);
                                                 if (sblocks >= 2 &&
                                                     sscore >= 8 &&
                                                     sscore > blen)
                                                         fprintf(stderr,
-                                                            "CFG-SUBGRAPH "
+                                                            "CFG-SUBGRAPH%s "
                                                             "%s+%06lo <=> "
                                                             "%s+%06lo : "
                                                             "%u BLOCKS; "
                                                             "%lu WORDS\n",
+                                                            sclosed ?
+                                                            "-CLOSED" : "",
                                                             in[ai].name,
                                                             ab[x].start,
                                                             in[bi].name,
