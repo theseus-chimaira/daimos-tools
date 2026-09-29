@@ -21,6 +21,8 @@ struct block {
         unsigned long end;
         unsigned long succ[2];
         unsigned int nsucc;
+        unsigned int incoming_branch;
+        unsigned int incoming_fallthrough;
 };
 
 #define NO_SUCC (~0UL)
@@ -141,6 +143,8 @@ build_blocks(const struct dobj_object *o, struct block **out)
                 b[n].end = end;
                 b[n].succ[0] = b[n].succ[1] = NO_SUCC;
                 b[n].nsucc = 0;
+                b[n].incoming_branch = 0;
+                b[n].incoming_fallthrough = 0;
                 n++;
                 i = end;
         }
@@ -170,6 +174,30 @@ build_blocks(const struct dobj_object *o, struct block **out)
                                 b[i].succ[b[i].nsucc++] = b[i].end + 1;
                 } else if (op != 0263 && b[i].end < o->text_words) {
                         b[i].succ[b[i].nsucc++] = b[i].end;
+                }
+        }
+        /*
+         * Classify incoming edges.  An existing explicit branch can be
+         * retargeted to a shared tail at zero execution cost.  A fall-through
+         * edge cannot: replacing it by JRST would add an instruction.
+         */
+        for (i = 0; i < n; i++) {
+                unsigned long si;
+                for (si = 0; si < b[i].nsucc; si++) {
+                        unsigned long j;
+                        for (j = 0; j < n; j++)
+                                if (b[j].start == b[i].succ[si]) {
+                                        unsigned long last = b[i].end - 1;
+                                        unsigned int op = (unsigned int)
+                                            ((o->text[last].lh >> 9) & 0777UL);
+                                        if ((op == 0254 ||
+                                            (op >= 0320 && op <= 0327)) &&
+                                            b[i].succ[si] != b[i].end)
+                                                b[j].incoming_branch++;
+                                        else
+                                                b[j].incoming_fallthrough++;
+                                        break;
+                                }
                 }
         }
         free(leader);
@@ -269,6 +297,78 @@ common_block_suffix(const struct dobj_object *ao, const struct block *a,
             word_at_equal(ao, a->end - 1 - n, bo, b->end - 1 - n))
                 n++;
         return n;
+}
+
+static unsigned long
+popj_epilogue_start(const struct dobj_object *o, const struct block *b)
+{
+        unsigned long p;
+        unsigned int op;
+
+        if (b->end <= b->start)
+                return b->end;
+        p = b->end - 1;
+        op = (unsigned int)((o->text[p].lh >> 9) & 0777UL);
+        if (op != 0263) /* POPJ */
+                return b->end;
+        while (p > b->start) {
+                op = (unsigned int)((o->text[p - 1].lh >> 9) & 0777UL);
+                if (op != 0262) /* POP */
+                        break;
+                p--;
+        }
+        return p;
+}
+
+static unsigned long
+common_epilogue_suffix(const struct dobj_object *ao, const struct block *a,
+    const struct dobj_object *bo, const struct block *b)
+{
+        unsigned long as = popj_epilogue_start(ao, a);
+        unsigned long bs = popj_epilogue_start(bo, b);
+        unsigned long n;
+
+        if (as == a->end || bs == b->end)
+                return 0;
+        n = common_block_suffix(ao, a, bo, b);
+        if (n > a->end - as)
+                n = a->end - as;
+        if (n > b->end - bs)
+                n = b->end - bs;
+        return n;
+}
+
+static unsigned long
+branch_targets_offset(const struct dobj_object *o, unsigned long off)
+{
+        unsigned long i, n = 0;
+        for (i = 0; i < o->reloc_count; i++) {
+                const struct dobj_reloc *r = &o->relocs[i];
+                unsigned int op;
+                if (r->loc_sec != DOBJ_SEC_TEXT ||
+                    r->type != DOBJ_RELOC_LOCAL_RH18 ||
+                    r->target_sec != DOBJ_SEC_TEXT ||
+                    r->addend.rh != off || r->offset >= o->text_words)
+                        continue;
+                op = (unsigned int)((o->text[r->offset].lh >> 9) & 0777UL);
+                if (op == 0254 || (op >= 0320 && op <= 0327))
+                        n++;
+        }
+        return n;
+}
+
+static int
+has_fallthrough_into(const struct dobj_object *o, unsigned long off)
+{
+        unsigned int op;
+        if (off == 0)
+                return 0;
+        op = (unsigned int)((o->text[off - 1].lh >> 9) & 0777UL);
+        /*
+         * Be conservative.  JRST and POPJ are the only terminal forms this
+         * analyzer currently proves cannot reach the following word.
+         */
+        return op != 0254 && op != 0263;
 }
 
 static int
@@ -574,6 +674,31 @@ main(int argc, char **argv)
                                         unsigned long n = common_block_suffix(
                                             &in[ai].obj, &ab[x],
                                             &in[bi].obj, &bb[y]);
+                                        unsigned long en =
+                                            common_epilogue_suffix(
+                                            &in[ai].obj, &ab[x],
+                                            &in[bi].obj, &bb[y]);
+                                        if (en >= 2)
+                                                fprintf(stderr,
+                                                    "EPILOGUE-SUFFIX%s %s+%06lo "
+                                                    "<=> %s+%06lo : %lu WORDS\n",
+                                                    (branch_targets_offset(
+                                                    &in[ai].obj,
+                                                    ab[x].end - en) != 0 &&
+                                                    !has_fallthrough_into(
+                                                    &in[ai].obj,
+                                                    ab[x].end - en) &&
+                                                    branch_targets_offset(
+                                                    &in[bi].obj,
+                                                    bb[y].end - en) != 0 &&
+                                                    !has_fallthrough_into(
+                                                    &in[bi].obj,
+                                                    bb[y].end - en)) ?
+                                                    "-RETARGETABLE" : "",
+                                                    in[ai].name,
+                                                    ab[x].end - en,
+                                                    in[bi].name,
+                                                    bb[y].end - en, en);
                                         if (n >= 3)
                                                 fprintf(stderr,
                                                     "CFG-SUFFIX %s+%06lo <=> "
