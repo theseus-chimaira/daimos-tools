@@ -256,11 +256,32 @@ rh_reloc(const struct dobj_object *o, unsigned long off)
 }
 
 static int
+has_text_entry(const struct dobj_object *o, unsigned long off)
+{
+        unsigned long i;
+        for (i = 0; i < o->symbol_count; i++)
+                if (o->symbols[i].kind == DOBJ_SYM_DEF &&
+                    o->symbols[i].sec == DOBJ_SEC_TEXT &&
+                    o->symbols[i].value.rh == off)
+                        return 1;
+        for (i = 0; i < o->reloc_count; i++) {
+                const struct dobj_reloc *r = &o->relocs[i];
+                if ((r->type == DOBJ_RELOC_LOCAL_RH18 ||
+                    r->type == DOBJ_RELOC_LOCAL_LH18) &&
+                    r->target_sec == DOBJ_SEC_TEXT &&
+                    r->addend.rh == off)
+                        return 1;
+        }
+        return 0;
+}
+
+static int
 cai0_jrst_replacement(const struct dobj_object *o, unsigned long off,
     unsigned int *replacement)
 {
         unsigned int op, nextop;
-        if (off + 1 >= o->text_words || rh_reloc(o, off) != NULL)
+        if (off + 1 >= o->text_words || rh_reloc(o, off) != NULL ||
+            has_text_entry(o, off + 1))
                 return 0;
         op = (unsigned int)((o->text[off].lh >> 9) & 0777UL);
         nextop = (unsigned int)((o->text[off + 1].lh >> 9) & 0777UL);
@@ -283,7 +304,8 @@ incdec_jump_replacement(const struct dobj_object *o, unsigned long off,
         unsigned long lh, nlh;
         unsigned int op, nop, ac, nac;
 
-        if (off + 1 >= o->text_words || rh_reloc(o, off) != NULL)
+        if (off + 1 >= o->text_words || rh_reloc(o, off) != NULL ||
+            has_text_entry(o, off + 1))
                 return 0;
         lh = o->text[off].lh;
         nlh = o->text[off + 1].lh;
@@ -305,7 +327,8 @@ incdec_jrst_replacement(const struct dobj_object *o, unsigned long off,
         unsigned long lh, nlh;
         unsigned int op, nop, nac;
 
-        if (off + 1 >= o->text_words || rh_reloc(o, off) != NULL)
+        if (off + 1 >= o->text_words || rh_reloc(o, off) != NULL ||
+            has_text_entry(o, off + 1))
                 return 0;
         lh = o->text[off].lh;
         nlh = o->text[off + 1].lh;
