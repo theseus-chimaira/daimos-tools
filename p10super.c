@@ -23,6 +23,8 @@ struct input {
 
 struct insn {
         struct dobj_word word;
+        const struct dobj_object *obj;
+        unsigned long off;
         unsigned int ac;
         unsigned long reads;
         unsigned long writes;
@@ -39,7 +41,6 @@ struct region {
         int input;
         unsigned long off;
         unsigned long n;
-        struct dobj_word canon[MAX_REGION];
         struct insn insn[MAX_REGION];
         int tail_candidate;
 };
@@ -51,38 +52,6 @@ unconditional_end_word(struct dobj_word w)
         return op == 0254UL || op == 0263UL; /* JRST, POPJ */
 }
 
-static unsigned long
-canon_lh(struct dobj_word w, const unsigned int map[16])
-{
-        unsigned long ac = (w.lh >> 5) & 017UL;
-        return (w.lh & ~0740UL) | ((unsigned long)map[ac] << 5);
-}
-
-/*
- * Rename ACs by first appearance.  AC0 and P (17) retain their ABI meaning;
- * the other AC numbers are scratch names for this advisory comparison.
- * Final acceptance still requires source reassembly and exact p10fold proof.
- */
-static void
-normalize_acs(struct dobj_word *v, unsigned long n)
-{
-        unsigned int map[16];
-        unsigned int next = 1;
-        unsigned long i;
-        unsigned int a;
-
-        for (a = 0; a < 16; a++) map[a] = 16;
-        map[0] = 0; map[15] = 15;
-        for (i = 0; i < n; i++) {
-                a = (unsigned int)((v[i].lh >> 5) & 017UL);
-                if (map[a] == 16) {
-                        while (next == 15) next++;
-                        map[a] = next++;
-                }
-                v[i].lh = canon_lh(v[i], map);
-        }
-}
-
 static void
 usage(void)
 {
@@ -90,16 +59,67 @@ usage(void)
 }
 
 static const struct dobj_reloc *
-rh_reloc(const struct dobj_object *o, unsigned long off)
+half_reloc(const struct dobj_object *o, unsigned long off, int left)
 {
         unsigned long i;
         for (i = 0; i < o->reloc_count; i++)
                 if (o->relocs[i].loc_sec == DOBJ_SEC_TEXT &&
                     o->relocs[i].offset == off &&
+                    (left ?
+                    (o->relocs[i].type == DOBJ_RELOC_LOCAL_LH18 ||
+                    o->relocs[i].type == DOBJ_RELOC_SYMBOL_LH18) :
                     (o->relocs[i].type == DOBJ_RELOC_LOCAL_RH18 ||
-                    o->relocs[i].type == DOBJ_RELOC_SYMBOL_RH18))
+                    o->relocs[i].type == DOBJ_RELOC_SYMBOL_RH18)))
                         return &o->relocs[i];
         return NULL;
+}
+
+static const struct dobj_reloc *
+rh_reloc(const struct dobj_object *o, unsigned long off)
+{
+        return half_reloc(o, off, 0);
+}
+
+static int
+reloc_equal(const struct dobj_object *ao, unsigned long aoff,
+    const struct dobj_object *bo, unsigned long boff, int left)
+{
+        const struct dobj_reloc *a = half_reloc(ao, aoff, left);
+        const struct dobj_reloc *b = half_reloc(bo, boff, left);
+        int asym, bsym;
+
+        if (a == NULL || b == NULL)
+                return a == b;
+        asym = a->type == DOBJ_RELOC_SYMBOL_LH18 ||
+            a->type == DOBJ_RELOC_SYMBOL_RH18;
+        bsym = b->type == DOBJ_RELOC_SYMBOL_LH18 ||
+            b->type == DOBJ_RELOC_SYMBOL_RH18;
+        if (asym != bsym ||
+            a->addend.lh != b->addend.lh || a->addend.rh != b->addend.rh)
+                return 0;
+        if (asym) {
+                if (a->symbol >= ao->symbol_count || b->symbol >= bo->symbol_count)
+                        return 0;
+                return strcmp(ao->symbols[a->symbol].name,
+                    bo->symbols[b->symbol].name) == 0;
+        }
+        return a->target_sec == b->target_sec;
+}
+
+static int
+insn_equal(const struct insn *a, const struct insn *b)
+{
+        const struct dobj_reloc *al = half_reloc(a->obj, a->off, 1);
+        const struct dobj_reloc *bl = half_reloc(b->obj, b->off, 1);
+        const struct dobj_reloc *ar = half_reloc(a->obj, a->off, 0);
+        const struct dobj_reloc *br = half_reloc(b->obj, b->off, 0);
+
+        if (al == NULL && bl == NULL && a->word.lh != b->word.lh)
+                return 0;
+        if (ar == NULL && br == NULL && a->word.rh != b->word.rh)
+                return 0;
+        return reloc_equal(a->obj, a->off, b->obj, b->off, 1) &&
+            reloc_equal(a->obj, a->off, b->obj, b->off, 0);
 }
 
 static int
@@ -144,6 +164,8 @@ decode_safe(const struct dobj_object *o, unsigned long off, struct insn *d)
         if (ind || xr)
                 return 0;
         d->word = o->text[off];
+        d->obj = o;
+        d->off = off;
         d->ac = ac;
         d->reads = d->writes = 0;
         d->mem_read = d->mem_write = 0;
@@ -232,58 +254,6 @@ independent(const struct insn *a, const struct insn *b)
         return !a->mem_write && !b->mem_write;
 }
 
-static int
-word_cmp(struct dobj_word a, struct dobj_word b)
-{
-        if (a.lh != b.lh)
-                return a.lh < b.lh ? -1 : 1;
-        if (a.rh != b.rh)
-                return a.rh < b.rh ? -1 : 1;
-        return 0;
-}
-
-/*
- * Lexicographically smallest topological schedule.  Dependencies preserve
- * the original order whenever two instructions are not proven independent.
- */
-static void
-canonicalize(const struct insn *v, unsigned long n, struct dobj_word *out)
-{
-        unsigned int pred[MAX_REGION] = {0};
-        unsigned int done = 0;
-        unsigned long i, j, k;
-
-        for (i = 0; i < n; i++)
-                for (j = i + 1; j < n; j++)
-                        if (!independent(&v[i], &v[j]))
-                                pred[j] |= 1U << i;
-        for (k = 0; k < n; k++) {
-                int best = -1;
-                for (i = 0; i < n; i++) {
-                        if ((done & (1U << i)) != 0 ||
-                            (pred[i] & ~done) != 0)
-                                continue;
-                        if (best < 0 ||
-                            word_cmp(v[i].word, v[(unsigned long)best].word) < 0)
-                                best = (int)i;
-                }
-                out[k] = v[(unsigned long)best].word;
-                done |= 1U << (unsigned int)best;
-        }
-}
-
-static int
-same_canon(const struct region *a, const struct region *b)
-{
-        unsigned long i;
-        if (a->n != b->n)
-                return 0;
-        for (i = 0; i < a->n; i++)
-                if (word_cmp(a->canon[i], b->canon[i]) != 0)
-                        return 0;
-        return 1;
-}
-
 static void
 build_pred(const struct insn *v, unsigned long n, unsigned int pred[MAX_REGION])
 {
@@ -320,7 +290,9 @@ common_schedule_rec(const struct region *a, const struct region *b,
                          * search is a separate transformation and must not be
                          * conflated with scheduling legality.
                          */
-                        if (word_cmp(aw, bw) != 0) continue;
+                        (void)aw;
+                        (void)bw;
+                        if (!insn_equal(&a->insn[i], &b->insn[j])) continue;
                         if (common_schedule_rec(a, b, ap, bp,
                             adone | (1U << i), bdone | (1U << j), depth + 1))
                                 return 1;
@@ -330,12 +302,16 @@ common_schedule_rec(const struct region *a, const struct region *b,
 }
 
 static int
-mapped_word_equal(struct dobj_word a, struct dobj_word b,
+mapped_insn_equal(const struct insn *a, const struct insn *b,
     int amap[16], int bmap[16])
 {
-        unsigned int aa = (unsigned int)((a.lh >> 5) & 017UL);
-        unsigned int ba = (unsigned int)((b.lh >> 5) & 017UL);
-        if ((a.lh & ~0740UL) != (b.lh & ~0740UL) || a.rh != b.rh)
+        unsigned int aa = (unsigned int)((a->word.lh >> 5) & 017UL);
+        unsigned int ba = (unsigned int)((b->word.lh >> 5) & 017UL);
+        struct insn ac = *a, bc = *b;
+
+        ac.word.lh &= ~0740UL;
+        bc.word.lh &= ~0740UL;
+        if (!insn_equal(&ac, &bc))
                 return 0;
         if (aa == 0 || aa == 15 || ba == 0 || ba == 15)
                 return aa == ba;
@@ -359,7 +335,7 @@ common_rename_rec(const struct region *a, const struct region *b,
                         int am[16], bm[16];
                         if ((bdone & (1U << j)) || (bp[j] & ~bdone)) continue;
                         memcpy(am, amap, sizeof(am)); memcpy(bm, bmap, sizeof(bm));
-                        if (!mapped_word_equal(a->insn[i].word, b->insn[j].word,
+                        if (!mapped_insn_equal(&a->insn[i], &b->insn[j],
                             am, bm)) continue;
                         if (common_rename_rec(a, b, ap, bp,
                             adone | (1U << i), bdone | (1U << j), depth + 1,
@@ -456,8 +432,6 @@ main(int argc, char **argv)
                                         in[ai].obj.text[start + len]);
                                 memcpy(r[nr].insn, v,
                                     (size_t)len * sizeof(v[0]));
-                                canonicalize(v, len, r[nr].canon);
-                                normalize_acs(r[nr].canon, len);
                                 nr++;
                         }
                 }
@@ -469,16 +443,17 @@ main(int argc, char **argv)
                         if (r[i].input == r[j].input ||
                             r[i].n != r[j].n)
                                 continue;
-                        sched = same_canon(&r[i], &r[j]) ||
-                            has_common_schedule(&r[i], &r[j]);
+                        sched = has_common_schedule(&r[i], &r[j]);
                         renamed = !sched &&
                             has_common_renamed_schedule(&r[i], &r[j]);
                         if (!sched && !renamed) continue;
                         /* Ignore regions already byte-identical in source order. */
                         int identical = 1;
                         for (unsigned long k = 0; k < r[i].n; k++)
-                                if (word_cmp(in[r[i].input].obj.text[r[i].off+k],
-                                    in[r[j].input].obj.text[r[j].off+k]) != 0)
+                                if (in[r[i].input].obj.text[r[i].off+k].lh !=
+                                    in[r[j].input].obj.text[r[j].off+k].lh ||
+                                    in[r[i].input].obj.text[r[i].off+k].rh !=
+                                    in[r[j].input].obj.text[r[j].off+k].rh)
                                         identical = 0;
                         if (identical) continue;
                         printf("%s%s %s+%06lo <=> %s+%06lo : %lu WORDS\n",
