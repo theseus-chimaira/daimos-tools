@@ -10,6 +10,14 @@ opportunities. It models a conservative subset of PDP-10 register, memory,
 half-word, compare and test semantics, and searches legal instruction
 schedules within bounded straight-line regions.
 
+For proven one-word peepholes, `p10super` emits `REWRITE` records with a
+symbol-relative source location, the original and replacement assembler form,
+the exact one-word saving, zero execution-cost delta, and the legality proof.
+For scheduling-equivalent regions it emits `REORDER` records naming both fold
+partners and the concrete old/new instruction-offset order on each side.
+Reordering itself claims no size saving; `FOLD-POTENTIAL` is only the region
+size which must still be reassembled and verified by `p10fold`.
+
 The tool is advisory: `SCHEDULE` results require no AC renaming. `RENAME`
 results require a consistent AC renaming and are emitted only when each
 renamed AC is conservatively proven local to the compared region: its incoming

@@ -320,14 +320,18 @@ static int
 cai0_jrst_replacement(const struct dobj_object *o, unsigned long off,
     unsigned int *replacement)
 {
+        unsigned long lh, nlh;
         unsigned int op, nextop;
         if (off + 1 >= o->text_words || rh_reloc(o, off) != NULL ||
             has_text_entry(o, off + 1))
                 return 0;
-        op = (unsigned int)((o->text[off].lh >> 9) & 0777UL);
-        nextop = (unsigned int)((o->text[off + 1].lh >> 9) & 0777UL);
+        lh = o->text[off].lh;
+        nlh = o->text[off + 1].lh;
+        op = (unsigned int)((lh >> 9) & 0777UL);
+        nextop = (unsigned int)((nlh >> 9) & 0777UL);
         if (op < 0301 || op > 0307 || o->text[off].rh != 0 ||
-            nextop != 0254)
+            (lh & 037UL) != 0UL || nextop != 0254 ||
+            ((nlh >> 5) & 017UL) != 0UL)
                 return 0;
         /*
          * CAIx AC,0 skips the JRST when condition x is true.  A single
@@ -336,6 +340,156 @@ cai0_jrst_replacement(const struct dobj_object *o, unsigned long off,
          */
         *replacement = 0320U + (((op - 0300U) ^ 04U) & 07U);
         return 1;
+}
+
+static const char *
+text_symbol_before(const struct dobj_object *o, unsigned long off,
+    unsigned long *basep)
+{
+        const char *best = NULL;
+        unsigned long base = 0UL;
+        unsigned long i;
+
+        for (i = 0UL; i < o->symbol_count; i++) {
+                const struct dobj_symbol *s = &o->symbols[i];
+
+                if (s->kind != DOBJ_SYM_DEF || s->sec != DOBJ_SEC_TEXT ||
+                    s->value.rh > off)
+                        continue;
+                if (best == NULL || s->value.rh > base) {
+                        best = s->name;
+                        base = s->value.rh;
+                }
+        }
+        if (basep != NULL)
+                *basep = base;
+        return best;
+}
+
+static void
+print_source_location(FILE *f, const struct input *in, unsigned long off)
+{
+        unsigned long base;
+        const char *s = text_symbol_before(&in->obj, off, &base);
+
+        fprintf(f, "%s:", in->name);
+        if (s == NULL)
+                fprintf(f, "TEXT+%06lo", off);
+        else if (base == off)
+                fprintf(f, "%s", s);
+        else
+                fprintf(f, "%s+%lo", s, off - base);
+}
+
+static const char *
+condition_mnemonic(unsigned int family, unsigned int op)
+{
+        static const char *const suffix[8] = {
+                "", "L", "E", "LE", "A", "GE", "N", "G"
+        };
+        static char name[16];
+        const char *base;
+
+        switch (family) {
+        case 0300U: base = "CAI"; break;
+        case 0320U: base = "JUMP"; break;
+        case 0340U: base = "AOJ"; break;
+        case 0360U: base = "SOJ"; break;
+        default: return "OP";
+        }
+        snprintf(name, sizeof(name), "%s%s", base, suffix[(op - family) & 7U]);
+        return name;
+}
+
+static void
+print_ea(FILE *f, const struct dobj_object *o, unsigned long off,
+    struct dobj_word w)
+{
+        const struct dobj_reloc *r = rh_reloc(o, off);
+        unsigned int ind = (unsigned int)((w.lh >> 4) & 1UL);
+        unsigned int xr = (unsigned int)(w.lh & 017UL);
+
+        if (ind)
+                fputc('@', f);
+        if (r != NULL && (r->type == DOBJ_RELOC_SYMBOL_RH18) &&
+            r->symbol != 0UL && r->symbol <= o->symbol_count) {
+                long add = 0L;
+                fprintf(f, "%s", o->symbols[r->symbol - 1UL].name);
+                if (dobj_word_addend18(r->addend, &add) == 0 && add != 0L)
+                        fprintf(f, "%+ld", add);
+        } else if (r != NULL && r->type == DOBJ_RELOC_LOCAL_RH18 &&
+            r->target_sec == DOBJ_SEC_TEXT) {
+                unsigned long base;
+                const char *s = text_symbol_before(o, r->addend.rh, &base);
+                if (s != NULL && base == r->addend.rh)
+                        fprintf(f, "%s", s);
+                else
+                        fprintf(f, "%06lo", r->addend.rh);
+        } else {
+                fprintf(f, "%06lo", w.rh);
+        }
+        if (xr != 0U)
+                fprintf(f, "(%o)", xr);
+}
+
+static void
+print_subset_insn(FILE *f, const struct dobj_object *o, unsigned long off,
+    struct dobj_word w)
+{
+        unsigned int op = (unsigned int)((w.lh >> 9) & 0777UL);
+        unsigned int ac = (unsigned int)((w.lh >> 5) & 017UL);
+
+        if (op >= 0300U && op <= 0307U)
+                fprintf(f, "%s %o,", condition_mnemonic(0300U, op), ac);
+        else if (op >= 0320U && op <= 0327U)
+                fprintf(f, "%s %o,", condition_mnemonic(0320U, op), ac);
+        else if (op >= 0340U && op <= 0347U)
+                fprintf(f, "%s %o,", condition_mnemonic(0340U, op), ac);
+        else if (op >= 0360U && op <= 0367U)
+                fprintf(f, "%s %o,", condition_mnemonic(0360U, op), ac);
+        else if (op == 0271U)
+                fprintf(f, "ADDI %o,", ac);
+        else if (op == 0275U)
+                fprintf(f, "SUBI %o,", ac);
+        else if (op == 0254U)
+                fprintf(f, "JRST ");
+        else {
+                fprintf(f, "%06lo,,%06lo", w.lh, w.rh);
+                return;
+        }
+        print_ea(f, o, off, w);
+}
+
+static struct dobj_word
+peephole_replacement_word(const struct dobj_object *o, unsigned long off,
+    unsigned int replacement)
+{
+        struct dobj_word w = o->text[off + 1UL];
+        unsigned int first_ac = (unsigned int)((o->text[off].lh >> 5) & 017UL);
+
+        w.lh &= 037UL;
+        w.lh |= ((unsigned long)replacement << 9) |
+            ((unsigned long)first_ac << 5);
+        return w;
+}
+
+static void
+print_peephole_rewrite(const struct input *in, unsigned long off,
+    unsigned int replacement, const char *reason)
+{
+        struct dobj_word nw = peephole_replacement_word(&in->obj, off,
+            replacement);
+
+        printf("REWRITE ");
+        print_source_location(stdout, in, off);
+        printf(" : SAVE 1; COST=ZERO; PARTNER=-; LEGAL=%s\n  OLD ", reason);
+        print_subset_insn(stdout, &in->obj, off, in->obj.text[off]);
+        printf(" ; ");
+        print_subset_insn(stdout, &in->obj, off + 1UL,
+            in->obj.text[off + 1UL]);
+        printf("\n  NEW ");
+        print_subset_insn(stdout, &in->obj, off + 1UL, nw);
+        putchar('\n');
 }
 
 static int
@@ -1179,7 +1333,8 @@ static int
 common_schedule_rec(const struct region *a, const struct region *b,
     const unsigned int ap[MAX_REGION], const unsigned int bp[MAX_REGION],
     unsigned int adone, unsigned int bdone, unsigned long depth,
-    int (*equal)(const struct insn *, const struct insn *))
+    int (*equal)(const struct insn *, const struct insn *),
+    unsigned int aorder[MAX_REGION], unsigned int border[MAX_REGION])
 {
         unsigned long i, j;
         if (depth == a->n) return 1;
@@ -1188,13 +1343,32 @@ common_schedule_rec(const struct region *a, const struct region *b,
                 for (j = 0; j < b->n; j++) {
                         if ((bdone & (1U << j)) || (bp[j] & ~bdone)) continue;
                         if (!equal(&a->insn[i], &b->insn[j])) continue;
+                        if (aorder != NULL)
+                                aorder[depth] = (unsigned int)i;
+                        if (border != NULL)
+                                border[depth] = (unsigned int)j;
                         if (common_schedule_rec(a, b, ap, bp,
                             adone | (1U << i), bdone | (1U << j), depth + 1,
-                            equal))
+                            equal, aorder, border))
                                 return 1;
                 }
         }
         return 0;
+}
+
+static int
+find_common_schedule(const struct region *a, const struct region *b,
+    int (*equal)(const struct insn *, const struct insn *),
+    unsigned int aorder[MAX_REGION], unsigned int border[MAX_REGION])
+{
+        unsigned int ap[MAX_REGION], bp[MAX_REGION];
+
+        if (a->n != b->n)
+                return 0;
+        build_pred(a->insn, a->n, ap);
+        build_pred(b->insn, b->n, bp);
+        return common_schedule_rec(a, b, ap, bp, 0, 0, 0, equal,
+            aorder, border);
 }
 
 static int
@@ -1263,24 +1437,46 @@ has_common_renamed_schedule(const struct region *a, const struct region *b)
 }
 
 static int
-has_common_schedule(const struct region *a, const struct region *b)
-{
-        unsigned int ap[MAX_REGION], bp[MAX_REGION];
-        if (a->n != b->n) return 0;
-        build_pred(a->insn, a->n, ap);
-        build_pred(b->insn, b->n, bp);
-        return common_schedule_rec(a, b, ap, bp, 0, 0, 0, insn_equal);
-}
-
-static int
 has_common_zero_schedule(const struct region *a, const struct region *b)
 {
-        unsigned int ap[MAX_REGION], bp[MAX_REGION];
-        if (a->n != b->n) return 0;
-        build_pred(a->insn, a->n, ap);
-        build_pred(b->insn, b->n, bp);
-        return common_schedule_rec(a, b, ap, bp, 0, 0, 0,
-            zero_form_equal);
+        return find_common_schedule(a, b, zero_form_equal, NULL, NULL);
+}
+
+static void
+print_order(const unsigned int order[MAX_REGION], unsigned long n)
+{
+        unsigned long i;
+
+        for (i = 0UL; i < n; i++)
+                printf("%s+%o", i == 0UL ? "" : " ", order[i]);
+}
+
+static void
+print_schedule_rewrite(const struct input *in, const struct region *a,
+    const struct region *b, const unsigned int aorder[MAX_REGION],
+    const unsigned int border[MAX_REGION])
+{
+        unsigned int identity[MAX_REGION];
+        unsigned long i;
+
+        for (i = 0UL; i < a->n; i++)
+                identity[i] = (unsigned int)i;
+        printf("REORDER ");
+        print_source_location(stdout, &in[a->input], a->off);
+        printf(" <=> ");
+        print_source_location(stdout, &in[b->input], b->off);
+        printf(" : SAVE 0; FOLD-POTENTIAL %lu; COST=ZERO; "
+            "LEGAL=DEPENDENCY-DAG-COMMON-SCHEDULE\n", a->n);
+        printf("  A OLD ");
+        print_order(identity, a->n);
+        printf(" ; NEW ");
+        print_order(aorder, a->n);
+        putchar('\n');
+        printf("  B OLD ");
+        print_order(identity, b->n);
+        printf(" ; NEW ");
+        print_order(border, b->n);
+        putchar('\n');
 }
 
 static int
@@ -1334,6 +1530,9 @@ main(int argc, char **argv)
                                     "PEEP-CAI0-JRST %s+%06lo : SAVE 1; "
                                     "JUMP OP %03o\n",
                                     in[ai].name, off, replacement);
+                                print_peephole_rewrite(&in[ai], off,
+                                    replacement,
+                                    "CAI-ZERO-PLAIN-JRST-COMPLEMENT");
                                 peephole_words++;
                         }
                         if (incdec_jump_replacement(&in[ai].obj, off,
@@ -1347,6 +1546,9 @@ main(int argc, char **argv)
                                     (((in[ai].obj.text[off].lh >> 9) &
                                     0777UL) == 0271UL) ? "AOJ" : "SOJ",
                                     replacement);
+                                print_peephole_rewrite(&in[ai], off,
+                                    replacement,
+                                    "INCDEC-ONE-SAME-AC-CONDITIONAL-JUMP");
                                 peephole_words++;
                         }
                         if (incdec_jrst_replacement(&in[ai].obj, off,
@@ -1360,6 +1562,9 @@ main(int argc, char **argv)
                                     (((in[ai].obj.text[off].lh >> 9) &
                                     0777UL) == 0271UL) ? "AOJ" : "SOJ",
                                     replacement);
+                                print_peephole_rewrite(&in[ai], off,
+                                    replacement,
+                                    "INCDEC-ONE-PLAIN-JRST");
                                 peephole_words++;
                         }
                 }
@@ -1603,10 +1808,13 @@ main(int argc, char **argv)
                         int sched;
                         int zero;
                         int renamed;
+                        unsigned int aorder[MAX_REGION];
+                        unsigned int border[MAX_REGION];
                         if (regions_overlap(&r[i], &r[j]) ||
                             r[i].n != r[j].n)
                                 continue;
-                        sched = has_common_schedule(&r[i], &r[j]);
+                        sched = find_common_schedule(&r[i], &r[j],
+                            insn_equal, aorder, border);
                         zero = !sched &&
                             has_common_zero_schedule(&r[i], &r[j]);
                         renamed = !sched && !zero &&
@@ -1621,6 +1829,9 @@ main(int argc, char **argv)
                                     in[r[j].input].obj.text[r[j].off+k].rh)
                                         identical = 0;
                         if (identical) continue;
+                        if (sched)
+                                print_schedule_rewrite(in, &r[i], &r[j],
+                                    aorder, border);
                         printf("%s%s %s+%06lo <=> %s+%06lo : %lu WORDS\n",
                             (r[i].tail_candidate && r[j].tail_candidate) ?
                                 "TAIL-" : "",
