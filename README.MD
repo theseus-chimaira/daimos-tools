@@ -25,6 +25,9 @@ results require a consistent AC renaming and are emitted only when each
 renamed AC is conservatively proven local to the compared region: its incoming
 value is killed before use and its outgoing value is killed before a later
 read. Unknown instructions and control-flow boundaries stop that proof.
+Direct unindexed effective addresses 0..17 are modeled as accumulator accesses,
+not independent memory, so scheduling dependencies respect the PDP-6/PDP-10
+AC-memory alias.
 `CANON-ZERO` reports equal-cost normalization between an unlabelled
 `MOVEI AC,0` and `SETZ AC`; labelled/alternate-entry instructions are not
 rewritten.  `CANON` records show the legal common order and zero-form rewrite;
