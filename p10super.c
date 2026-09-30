@@ -78,17 +78,31 @@ unconditional_end_word(struct dobj_word w)
 }
 
 static int
-is_skip_opcode(unsigned int op)
+skip_family(unsigned int op)
 {
-        if (op >= 0300 && op <= 0317)
-                return (op & 07U) != 0;
-        if (op >= 0600 && op <= 0677)
-                return (op & 07U) != 0;
+        if (op >= 0300 && op <= 0317)     /* CAI, CAM */
+                return (int)(op & ~07U);
         if ((op >= 0330 && op <= 0337) || /* SKIP */
             (op >= 0350 && op <= 0357) || /* AOS */
             (op >= 0370 && op <= 0377))   /* SOS */
-                return (op & 07U) != 0;
-        return 0;
+                return (int)(op & ~07U);
+        if (op >= 0600 && op <= 0677)     /* TR/TL test families */
+                return (int)(op & ~07U);
+        return -1;
+}
+
+static int
+is_conditional_skip_opcode(unsigned int op)
+{
+        unsigned int condition = op & 07U;
+
+        return skip_family(op) >= 0 && condition != 0U && condition != 04U;
+}
+
+static int
+is_always_skip_opcode(unsigned int op)
+{
+        return skip_family(op) >= 0 && (op & 07U) == 04U;
 }
 
 static int
@@ -101,7 +115,7 @@ is_control_word(struct dobj_word w)
             (op >= 0340 && op <= 0347) || /* AOJ */
             (op >= 0360 && op <= 0367))   /* SOJ */
                 return 1;
-        return is_skip_opcode(op);
+        return is_conditional_skip_opcode(op) || is_always_skip_opcode(op);
 }
 
 static int
@@ -111,16 +125,6 @@ is_invertible_jump(struct dobj_word w)
         return (op >= 0321 && op <= 0327 && op != 0324) ||
             (op >= 0341 && op <= 0347 && op != 0344) ||
             (op >= 0361 && op <= 0367 && op != 0364);
-}
-
-static int
-compare_skip_family(unsigned int op)
-{
-        if (op >= 0301 && op <= 0307 && op != 0304)
-                return 0300; /* CAI */
-        if (op >= 0311 && op <= 0317 && op != 0314)
-                return 0310; /* CAM */
-        return 0;
 }
 
 static unsigned long
@@ -154,8 +158,10 @@ build_blocks(const struct dobj_object *o, struct block **out)
         for (i = 0; i + 1 < o->text_words; i++) {
                 if (is_control_word(o->text[i]))
                         leader[i + 1] = 1;
-                if (is_skip_opcode((unsigned int)
-                    ((o->text[i].lh >> 9) & 0777UL)) &&
+                if ((is_conditional_skip_opcode((unsigned int)
+                    ((o->text[i].lh >> 9) & 0777UL)) ||
+                    is_always_skip_opcode((unsigned int)
+                    ((o->text[i].lh >> 9) & 0777UL))) &&
                     i + 2 < o->text_words)
                         leader[i + 2] = 1;
         }
@@ -208,10 +214,13 @@ build_blocks(const struct dobj_object *o, struct block **out)
                                 b[i].succ[b[i].nsucc++] = target;
                         if (b[i].end < o->text_words && b[i].nsucc < 2)
                                 b[i].succ[b[i].nsucc++] = b[i].end;
-                } else if (is_skip_opcode(op)) {
+                } else if (is_conditional_skip_opcode(op)) {
                         if (b[i].end < o->text_words)
                                 b[i].succ[b[i].nsucc++] = b[i].end;
                         if (b[i].end + 1 < o->text_words && b[i].nsucc < 2)
+                                b[i].succ[b[i].nsucc++] = b[i].end + 1;
+                } else if (is_always_skip_opcode(op)) {
+                        if (b[i].end + 1 < o->text_words)
                                 b[i].succ[b[i].nsucc++] = b[i].end + 1;
                 } else if (op != 0263 && b[i].end < o->text_words) {
                         b[i].succ[b[i].nsucc++] = b[i].end;
@@ -392,10 +401,11 @@ reloc_equal(const struct dobj_object *ao, unsigned long aoff,
             a->addend.lh != b->addend.lh || a->addend.rh != b->addend.rh)
                 return 0;
         if (asym) {
-                if (a->symbol >= ao->symbol_count || b->symbol >= bo->symbol_count)
+                if (a->symbol == 0UL || a->symbol > ao->symbol_count ||
+                    b->symbol == 0UL || b->symbol > bo->symbol_count)
                         return 0;
-                return strcmp(ao->symbols[a->symbol].name,
-                    bo->symbols[b->symbol].name) == 0;
+                return strcmp(ao->symbols[a->symbol - 1UL].name,
+                    bo->symbols[b->symbol - 1UL].name) == 0;
         }
         return a->target_sec == b->target_sec;
 }
@@ -513,8 +523,8 @@ guard_shape_at(const struct dobj_object *o, const struct block *g,
                 return 0;
         last = g->end - 1;
         op = (unsigned int)((o->text[last].lh >> 9) & 0777UL);
-        family = (unsigned int)compare_skip_family(op);
-        if (family == 0)
+        family = (unsigned int)skip_family(op);
+        if (!is_conditional_skip_opcode(op))
                 return 0;
         /*
          * The non-skipped successor must be a private one-word JRST.
