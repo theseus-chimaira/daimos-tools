@@ -31,7 +31,9 @@ runs, so a non-removable maximal match does not hide a legal shorter fold.
 With `-P fold.plan`, it writes the selected non-overlapping zero-cost folds as
 a `P10FOLD1` plan. `dlink --fold-plan fold.plan` consumes that plan while
 laying out TEXT, omits donor words, retargets references to the retained anchor,
-and shifts later symbols and relocations through the compacted TEXT map.
+and shifts later symbols and relocations through the compacted TEXT map.  DLINK
+REVALIDATES EACH PLAN RANGE WITH THE SAME RELOCATION-AWARE EQUALITY CONTRACT
+BEFORE REMOVING TEXT, SO A STALE PLAN CANNOT SILENTLY DELETE CHANGED CODE.
 
 THE DAS ASSEMBLER AND THE TEST SUITES ARE MAINTAINED IN SEPARATE PROJECTS.
 

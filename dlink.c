@@ -194,6 +194,85 @@ static int find_object_by_name(const struct linker *l, const char *name)
     return -1;
 }
 
+static const struct dobj_reloc *
+fold_half_reloc(const struct dobj_object *o, unsigned long off, int left)
+{
+    unsigned long i;
+
+    for (i = 0UL; i < o->reloc_count; i++) {
+        const struct dobj_reloc *r = &o->relocs[i];
+        int match;
+
+        if (r->loc_sec != DOBJ_SEC_TEXT || r->offset != off)
+            continue;
+        if (left)
+            match = r->type == DOBJ_RELOC_LOCAL_LH18 ||
+                    r->type == DOBJ_RELOC_SYMBOL_LH18;
+        else
+            match = r->type == DOBJ_RELOC_LOCAL_RH18 ||
+                    r->type == DOBJ_RELOC_SYMBOL_RH18;
+        if (match)
+            return r;
+    }
+    return NULL;
+}
+
+static int
+fold_half_equal(const struct dobj_object *a, unsigned long ao,
+                const struct dobj_object *b, unsigned long bo,
+                unsigned long abase, unsigned long bbase,
+                unsigned long span, int left)
+{
+    const struct dobj_reloc *ar = fold_half_reloc(a, ao, left);
+    const struct dobj_reloc *br = fold_half_reloc(b, bo, left);
+    unsigned long aw = left ? a->text[ao].lh : a->text[ao].rh;
+    unsigned long bw = left ? b->text[bo].lh : b->text[bo].rh;
+
+    if (ar == NULL || br == NULL)
+        return ar == br && aw == bw;
+    if (ar->type != br->type)
+        return 0;
+    if (ar->type == DOBJ_RELOC_SYMBOL_RH18 ||
+        ar->type == DOBJ_RELOC_SYMBOL_LH18) {
+        const struct dobj_symbol *as;
+        const struct dobj_symbol *bs;
+
+        if (ar->symbol == 0UL || ar->symbol > a->symbol_count ||
+            br->symbol == 0UL || br->symbol > b->symbol_count)
+            return 0;
+        as = &a->symbols[ar->symbol - 1UL];
+        bs = &b->symbols[br->symbol - 1UL];
+        return strcmp(as->name, bs->name) == 0 &&
+               ar->addend.lh == br->addend.lh &&
+               ar->addend.rh == br->addend.rh;
+    }
+    if (ar->target_sec != br->target_sec)
+        return 0;
+    if (ar->target_sec == DOBJ_SEC_TEXT &&
+        ar->addend.rh >= abase && ar->addend.rh < abase + span &&
+        br->addend.rh >= bbase && br->addend.rh < bbase + span)
+        return ar->addend.rh - abase == br->addend.rh - bbase &&
+               ar->addend.lh == br->addend.lh;
+    return ar->addend.lh == br->addend.lh &&
+           ar->addend.rh == br->addend.rh;
+}
+
+static int
+fold_range_equal(const struct dobj_object *a, unsigned long abase,
+                 const struct dobj_object *b, unsigned long bbase,
+                 unsigned long words)
+{
+    unsigned long i;
+
+    for (i = 0UL; i < words; i++)
+        if (!fold_half_equal(a, abase + i, b, bbase + i,
+                             abase, bbase, words, 0) ||
+            !fold_half_equal(a, abase + i, b, bbase + i,
+                             abase, bbase, words, 1))
+            return 0;
+    return 1;
+}
+
 static int add_fold_rule(struct linker *l, int donor_object,
                          unsigned long donor_off, int anchor_object,
                          unsigned long anchor_off, unsigned long words)
@@ -285,6 +364,13 @@ static int load_fold_plan(struct linker *l, const char *name)
         if (dv + wv > l->objects[di].obj.text_words ||
             av + wv > l->objects[ai].obj.text_words) {
             fprintf(stderr, "dlink: fold range outside object TEXT\n");
+            fclose(f);
+            return -1;
+        }
+        if (!fold_range_equal(&l->objects[di].obj, dv,
+                              &l->objects[ai].obj, av, wv)) {
+            fprintf(stderr, "dlink: stale or invalid fold plan range: "
+                    "%s+%06lo / %s+%06lo\n", dn, dv, an, av);
             fclose(f);
             return -1;
         }
