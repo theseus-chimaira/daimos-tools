@@ -740,12 +740,18 @@ main(int argc, char **argv)
                 next_block[member] = TSFS_TDIR_DEFAULT_BLOCK;
         data_member = 0U;
 
-        for (i = 1U; i < file_count; ++i) {
+        /*
+         * File-table records are breadth-first and name-sorted for cheap
+         * lookup, but physical tape order follows the manifest.  Manifest
+         * order is the only practical locality hint available to a read-only
+         * sequential medium and avoids turning boot into long seek sweeps.
+         */
+        for (i = 0U; i < node_count; ++i) {
                 struct manifest_node *node;
                 uint64_t *source;
                 unsigned int e;
 
-                node = &nodes[record_to_node[i - 1U]];
+                node = &nodes[i];
                 if (node->is_dir || node->size_words == 0U)
                         continue;
                 if (read_source_words(node->source, &source,
