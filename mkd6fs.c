@@ -462,49 +462,6 @@ static uint64_t *load_words(const char *path, unsigned *wordsp)
         return words;
 }
 
-static uint64_t *load_text(const char *path, unsigned *wordsp,
-    unsigned *tailp)
-{
-        FILE *fp;
-        long size;
-        uint64_t *words;
-        unsigned n;
-        unsigned i;
-
-        fp = fopen(path, "rb");
-        if (fp == NULL)
-                die_path(path);
-        if (fseek(fp, 0L, SEEK_END) != 0)
-                die_path(path);
-        size = ftell(fp);
-        if (size < 0)
-                die_path(path);
-        rewind(fp);
-        if ((unsigned long)size > (unsigned long)UINT_MAX)
-                die("text file is too large");
-        n = ((unsigned)size + 3U) / 4U;
-        words = n == 0U ? NULL : calloc(n, sizeof(*words));
-        if (n != 0U && words == NULL)
-                die("out of memory");
-        for (i = 0U; i < (unsigned)size; ++i) {
-                int ch;
-                unsigned shift;
-
-                ch = fgetc(fp);
-                if (ch == EOF)
-                        die_path(path);
-                shift = 27U - (i & 3U) * 9U;
-                words[i >> 2] |= ((uint64_t)(unsigned)ch) << shift;
-        }
-        if (fgetc(fp) != EOF)
-                die_path(path);
-        fclose(fp);
-        *wordsp = n;
-        *tailp = n == 0U ? 0U :
-            (unsigned)size - (n - 1U) * 4U;
-        return words;
-}
-
 static void parse_file_spec(const char *spec)
 {
         char *copy, *path, *host, *mode_s, *enc, *leaf;
@@ -543,11 +500,8 @@ static void parse_file_spec(const char *spec)
         } else if (strcmp(enc, "binwords") == 0) {
                 nodes[idx].data = load_binwords(host, &nodes[idx].data_words);
                 nodes[idx].tail = nodes[idx].data_words == 0U ? 0U : 4U;
-        } else if (strcmp(enc, "text") == 0) {
-                nodes[idx].data = load_text(host, &nodes[idx].data_words,
-                    &nodes[idx].tail);
         } else {
-                die("unsupported encoding (use dxr, words, binwords or text)");
+                die("unsupported encoding (use dxr, words or binwords)");
         }
         free(copy);
 }
@@ -1012,7 +966,7 @@ static void usage(void)
 {
         fprintf(stderr,
             "usage: mkd6fs -n members -d diskdir "
-            "[-D PATH:MODE] [-f PATH:HOST:MODE:dxr|words|binwords|text] "
+            "[-D PATH:MODE] [-f PATH:HOST:MODE:dxr|words|binwords] "
             "[-l PATH:TARGET:MODE] [...]\n");
         exit(2);
 }

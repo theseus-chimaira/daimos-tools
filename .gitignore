@@ -16,3 +16,8 @@ p10run
 pdp10-objdump
 mkinitfs0
 mkbootbanner
+d6lz
+mktsfs
+p10fold
+p10super
+tsfscheck
