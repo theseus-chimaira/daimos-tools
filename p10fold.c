@@ -12,6 +12,35 @@ struct input {
         const struct dobj_reloc **reloc_at;
 };
 
+struct name_list {
+        char **name;
+        unsigned long count;
+        unsigned long cap;
+};
+
+struct removed_range {
+        char *object;
+        unsigned long off;
+        unsigned long words;
+};
+
+struct removed_list {
+        struct removed_range *range;
+        unsigned long count;
+        unsigned long cap;
+};
+
+struct cross_candidate {
+        int donor;
+        unsigned long donor_off;
+        int anchor;
+        unsigned long anchor_off;
+        unsigned long words;
+        unsigned long save;
+        int one_jrst;
+        const char *function;
+};
+
 struct occurrence {
         int input;
         unsigned long off;
@@ -29,7 +58,97 @@ static void
 usage(void)
 {
         fprintf(stderr,
-            "usage: p10fold [-m min-words] [-P fold.plan] object.dobj ...\n");
+            "usage: p10fold [-m min-words] [-P fold.plan] object.dobj ...\n"
+            "       p10fold [-m min-words] -a anchor.dobj [-a anchor.dobj ...]\n"
+            "           [-x anchor.fold] [-C cold.list] donor.dobj ...\n");
+}
+
+static int
+name_list_add(struct name_list *l, const char *name)
+{
+        char **p;
+        char *s;
+        unsigned long cap;
+
+        if (l->count == l->cap) {
+                cap = l->cap ? l->cap * 2UL : 8UL;
+                p = (char **)realloc(l->name, (size_t)cap * sizeof(*p));
+                if (p == NULL)
+                        return -1;
+                l->name = p;
+                l->cap = cap;
+        }
+        s = (char *)malloc(strlen(name) + 1U);
+        if (s == NULL)
+                return -1;
+        strcpy(s, name);
+        l->name[l->count++] = s;
+        return 0;
+}
+
+static void
+name_list_free(struct name_list *l)
+{
+        unsigned long i;
+
+        for (i = 0UL; i < l->count; i++)
+                free(l->name[i]);
+        free(l->name);
+        memset(l, 0, sizeof(*l));
+}
+
+static int
+load_name_list(struct name_list *l, const char *name)
+{
+        FILE *f;
+        char line[1024];
+
+        f = fopen(name, "r");
+        if (f == NULL) {
+                perror(name);
+                return -1;
+        }
+        while (fgets(line, sizeof(line), f) != NULL) {
+                char *p = line;
+                char *e;
+
+                p[strcspn(p, "\r\n")] = '\0';
+                while (*p == ' ' || *p == '\t')
+                        p++;
+                if (*p == '\0' || *p == '#')
+                        continue;
+                e = p + strlen(p);
+                while (e > p && (e[-1] == ' ' || e[-1] == '\t'))
+                        *--e = '\0';
+                if (strchr(p, ' ') != NULL || strchr(p, '\t') != NULL) {
+                        fprintf(stderr, "p10fold: malformed cold-list line: %s\n",
+                            p);
+                        fclose(f);
+                        return -1;
+                }
+                if (name_list_add(l, p) != 0) {
+                        fclose(f);
+                        return -1;
+                }
+        }
+        if (ferror(f)) {
+                fclose(f);
+                return -1;
+        }
+        return fclose(f) == 0 ? 0 : -1;
+}
+
+static int
+name_list_has(const struct name_list *l, const char *name)
+{
+        unsigned long i;
+
+        if (name == NULL)
+                return 0;
+        for (i = 0UL; i < l->count; i++)
+                if (strcmp(l->name[i], name) == 0)
+                        return 1;
+        return 0;
 }
 
 static int
@@ -132,6 +251,27 @@ symbol_at(const struct input *in, unsigned long off)
         return NULL;
 }
 
+static const char *
+enclosing_symbol(const struct input *in, unsigned long off)
+{
+        unsigned long i;
+        unsigned long best = 0UL;
+        const char *name = NULL;
+
+        for (i = 0UL; i < in->obj.symbol_count; i++) {
+                const struct dobj_symbol *s = &in->obj.symbols[i];
+
+                if (s->kind != DOBJ_SYM_DEF || s->sec != DOBJ_SEC_TEXT ||
+                    s->value.rh > off)
+                        continue;
+                if (name == NULL || s->value.rh >= best) {
+                        best = s->value.rh;
+                        name = s->name;
+                }
+        }
+        return name;
+}
+
 static unsigned long
 next_symbol(const struct input *in, unsigned long off)
 {
@@ -218,6 +358,177 @@ removable_block(const struct input *in, unsigned long off,
 }
 
 static int
+jump_foldable_block(const struct input *in, unsigned long off,
+    unsigned long words)
+{
+        unsigned long i;
+
+        if (words < 2UL || off + words > in->obj.text_words ||
+            !unconditional_end(in, off + words - 1UL))
+                return 0;
+        /*
+         * Word zero remains present and becomes the JRST to the external
+         * anchor.  No independently reachable address may therefore live in
+         * the words which will be removed after it.
+         */
+        for (i = 0UL; i < in->obj.symbol_count; i++) {
+                const struct dobj_symbol *s = &in->obj.symbols[i];
+
+                if (s->kind == DOBJ_SYM_DEF && s->sec == DOBJ_SEC_TEXT &&
+                    s->value.rh > off && s->value.rh < off + words)
+                        return 0;
+        }
+        for (i = 0UL; i < in->obj.reloc_count; i++) {
+                const struct dobj_reloc *r = &in->obj.relocs[i];
+
+                if ((r->type == DOBJ_RELOC_LOCAL_RH18 ||
+                    r->type == DOBJ_RELOC_LOCAL_LH18) &&
+                    r->target_sec == DOBJ_SEC_TEXT &&
+                    r->addend.rh > off && r->addend.rh < off + words &&
+                    (r->loc_sec != DOBJ_SEC_TEXT || r->offset < off ||
+                    r->offset >= off + words))
+                        return 0;
+        }
+        return 1;
+}
+
+static int
+removed_list_add(struct removed_list *l, const char *object,
+    unsigned long off, unsigned long words)
+{
+        struct removed_range *p;
+        char *s;
+        unsigned long cap;
+
+        if (l->count == l->cap) {
+                cap = l->cap ? l->cap * 2UL : 16UL;
+                p = (struct removed_range *)realloc(l->range,
+                    (size_t)cap * sizeof(*p));
+                if (p == NULL)
+                        return -1;
+                l->range = p;
+                l->cap = cap;
+        }
+        s = (char *)malloc(strlen(object) + 1U);
+        if (s == NULL)
+                return -1;
+        strcpy(s, object);
+        l->range[l->count].object = s;
+        l->range[l->count].off = off;
+        l->range[l->count].words = words;
+        l->count++;
+        return 0;
+}
+
+static void
+removed_list_free(struct removed_list *l)
+{
+        unsigned long i;
+
+        for (i = 0UL; i < l->count; i++)
+                free(l->range[i].object);
+        free(l->range);
+        memset(l, 0, sizeof(*l));
+}
+
+static int
+load_removed_plan(struct removed_list *l, const char *name)
+{
+        FILE *f;
+        char line[4096];
+        int first_line = 1;
+
+        f = fopen(name, "r");
+        if (f == NULL) {
+                perror(name);
+                return -1;
+        }
+        while (fgets(line, sizeof(line), f) != NULL) {
+                char *kind, *object, *off, *anchor, *aoff, *words, *extra;
+                char *end;
+                unsigned long ov, wv;
+
+                line[strcspn(line, "\r\n")] = '\0';
+                if (first_line) {
+                        first_line = 0;
+                        if (strcmp(line, "P10FOLD1") != 0) {
+                                fprintf(stderr,
+                                    "p10fold: bad anchor fold-plan header\n");
+                                fclose(f);
+                                return -1;
+                        }
+                        continue;
+                }
+                if (line[0] == '\0')
+                        continue;
+                kind = strtok(line, "\t");
+                object = strtok(NULL, "\t");
+                off = strtok(NULL, "\t");
+                anchor = strtok(NULL, "\t");
+                aoff = strtok(NULL, "\t");
+                words = strtok(NULL, "\t");
+                extra = strtok(NULL, "\t");
+                if (kind == NULL || strcmp(kind, "FOLD") != 0 ||
+                    object == NULL || off == NULL || anchor == NULL ||
+                    aoff == NULL || words == NULL || extra != NULL) {
+                        fprintf(stderr,
+                            "p10fold: malformed anchor fold-plan line\n");
+                        fclose(f);
+                        return -1;
+                }
+                ov = strtoul(off, &end, 8);
+                if (*off == '\0' || *end != '\0') {
+                        fclose(f);
+                        return -1;
+                }
+                wv = strtoul(words, &end, 8);
+                if (*words == '\0' || *end != '\0' || wv == 0UL) {
+                        fclose(f);
+                        return -1;
+                }
+                if (removed_list_add(l, object, ov, wv) != 0) {
+                        fclose(f);
+                        return -1;
+                }
+        }
+        if (ferror(f) || first_line) {
+                fclose(f);
+                return -1;
+        }
+        return fclose(f) == 0 ? 0 : -1;
+}
+
+static int
+anchor_range_survives(const struct removed_list *l, const char *object,
+    unsigned long off, unsigned long words)
+{
+        unsigned long i;
+        const char *obase = strrchr(object, '/');
+
+        obase = obase != NULL ? obase + 1 : object;
+
+        for (i = 0UL; i < l->count; i++) {
+                const struct removed_range *r = &l->range[i];
+                const char *rbase = strrchr(r->object, '/');
+
+                rbase = rbase != NULL ? rbase + 1 : r->object;
+                /*
+                 * Build systems commonly spell the same object once with an
+                 * absolute path and once relative to the working directory.
+                 * A basename match is deliberately conservative here: a
+                 * collision can only exclude a candidate, never admit an
+                 * anchor which the supplied fold plan removed.
+                 */
+                if (strcmp(r->object, object) != 0 &&
+                    strcmp(rbase, obase) != 0)
+                        continue;
+                if (off < r->off + r->words && off + words > r->off)
+                        return 0;
+        }
+        return 1;
+}
+
+static int
 same_occurrence(const struct occurrence *a, const struct occurrence *b)
 {
         return a->input == b->input && a->off == b->off;
@@ -298,6 +609,288 @@ add_zero_group(struct group **groupsp, unsigned long *countp,
             group_add(&groups[*countp], bi, bo, br) != 0)
                 return -1;
         (*countp)++;
+        return 0;
+}
+
+static int
+cross_candidate_add(struct cross_candidate **cp, unsigned long *countp,
+    unsigned long *capp, const struct cross_candidate *c)
+{
+        struct cross_candidate *p;
+        unsigned long i;
+        unsigned long cap;
+
+        for (i = 0UL; i < *countp; i++) {
+                struct cross_candidate *old = &(*cp)[i];
+
+                if (old->donor != c->donor ||
+                    old->donor_off != c->donor_off ||
+                    old->words != c->words)
+                        continue;
+                if (c->save > old->save ||
+                    (c->save == old->save && c->one_jrst < old->one_jrst) ||
+                    (c->save == old->save && c->one_jrst == old->one_jrst &&
+                    (c->anchor < old->anchor ||
+                    (c->anchor == old->anchor &&
+                    c->anchor_off < old->anchor_off))))
+                        *old = *c;
+                return 0;
+        }
+        if (*countp == *capp) {
+                cap = *capp ? *capp * 2UL : 32UL;
+                p = (struct cross_candidate *)realloc(*cp,
+                    (size_t)cap * sizeof(*p));
+                if (p == NULL)
+                        return -1;
+                *cp = p;
+                *capp = cap;
+        }
+        (*cp)[(*countp)++] = *c;
+        return 0;
+}
+
+static int
+cross_candidate_cmp(const void *av, const void *bv)
+{
+        const struct cross_candidate *a =
+            (const struct cross_candidate *)av;
+        const struct cross_candidate *b =
+            (const struct cross_candidate *)bv;
+        unsigned long ae = a->donor_off + a->words;
+        unsigned long be = b->donor_off + b->words;
+
+        if (a->donor != b->donor)
+                return a->donor < b->donor ? -1 : 1;
+        if (ae != be)
+                return ae < be ? -1 : 1;
+        if (a->donor_off != b->donor_off)
+                return a->donor_off < b->donor_off ? -1 : 1;
+        if (a->save != b->save)
+                return a->save > b->save ? -1 : 1;
+        if (a->one_jrst != b->one_jrst)
+                return a->one_jrst < b->one_jrst ? -1 : 1;
+        if (a->anchor != b->anchor)
+                return a->anchor < b->anchor ? -1 : 1;
+        if (a->anchor_off != b->anchor_off)
+                return a->anchor_off < b->anchor_off ? -1 : 1;
+        return 0;
+}
+
+static int
+cross_analyze(struct input *inputs, int count, int anchor_count,
+    unsigned long min_words, const struct name_list *cold,
+    const struct removed_list *removed)
+{
+        struct cross_candidate *cand = NULL;
+        unsigned long cand_count = 0UL;
+        unsigned long cand_cap = 0UL;
+        unsigned long rejected_hot = 0UL;
+        unsigned long rejected_shape = 0UL;
+        unsigned long raw_zero = 0UL;
+        unsigned long raw_cold = 0UL;
+        int ai, bi;
+
+        printf("P10FOLD CROSS-DOMAIN ANALYSIS\n");
+        printf("MINIMUM RUN: %lu WORDS\n", min_words);
+        printf("READ-ONLY ANCHORS: %d OBJECTS\n", anchor_count);
+        printf("DONORS: %d OBJECTS\n", count - anchor_count);
+        printf("ONE-JRST POLICY: EXPLICIT COLD-SYMBOL ALLOWLIST\n\n");
+
+        for (ai = 0; ai < anchor_count; ai++) {
+                unsigned long ao;
+
+                for (ao = 0UL;
+                    ao + min_words <= inputs[ai].obj.text_words; ao++) {
+                        for (bi = anchor_count; bi < count; bi++) {
+                                unsigned long bo;
+
+                                for (bo = 0UL;
+                                    bo + min_words <= inputs[bi].obj.text_words;
+                                    bo++) {
+                                        unsigned long max;
+                                        unsigned long n;
+                                        unsigned long suboff;
+
+                                        if (!range_equal(&inputs[ai], ao,
+                                            &inputs[bi], bo, min_words))
+                                                continue;
+                                        if (ao != 0UL && bo != 0UL &&
+                                            range_equal(&inputs[ai], ao - 1UL,
+                                            &inputs[bi], bo - 1UL,
+                                            min_words + 1UL))
+                                                continue;
+                                        max = inputs[ai].obj.text_words - ao;
+                                        if (inputs[bi].obj.text_words - bo < max)
+                                                max = inputs[bi].obj.text_words - bo;
+                                        n = min_words;
+                                        while (n < max &&
+                                            range_equal(&inputs[ai], ao,
+                                            &inputs[bi], bo, n + 1UL))
+                                                n++;
+
+                                        for (suboff = 0UL;
+                                            suboff + min_words <= n; suboff++) {
+                                                unsigned long subn;
+                                                for (subn = min_words;
+                                                    suboff + subn <= n; subn++) {
+                                                        struct cross_candidate c;
+                                                        const char *func;
+                                                        int removable;
+
+                                                        if (!anchor_range_survives(
+                                                            removed,
+                                                            inputs[ai].name,
+                                                            ao + suboff, subn))
+                                                                continue;
+                                                        removable = removable_block(
+                                                            &inputs[bi],
+                                                            bo + suboff, subn);
+                                                        memset(&c, 0, sizeof(c));
+                                                        c.donor = bi;
+                                                        c.donor_off = bo + suboff;
+                                                        c.anchor = ai;
+                                                        c.anchor_off = ao + suboff;
+                                                        c.words = subn;
+                                                        func = enclosing_symbol(
+                                                            &inputs[bi],
+                                                            bo + suboff);
+                                                        c.function = func;
+                                                        if (removable) {
+                                                                c.save = subn;
+                                                                c.one_jrst = 0;
+                                                                raw_zero += subn;
+                                                        } else if (
+                                                            jump_foldable_block(
+                                                            &inputs[bi],
+                                                            bo + suboff, subn)) {
+                                                                if (!name_list_has(
+                                                                    cold, func)) {
+                                                                        rejected_hot++;
+                                                                        continue;
+                                                                }
+                                                                c.save = subn - 1UL;
+                                                                c.one_jrst = 1;
+                                                                raw_cold += c.save;
+                                                        } else {
+                                                                rejected_shape++;
+                                                                continue;
+                                                        }
+                                                        if (cross_candidate_add(
+                                                            &cand, &cand_count,
+                                                            &cand_cap, &c) != 0) {
+                                                                free(cand);
+                                                                return 1;
+                                                        }
+                                                }
+                                        }
+                                }
+                        }
+                }
+        }
+
+        qsort(cand, (size_t)cand_count, sizeof(*cand), cross_candidate_cmp);
+        printf("ELIGIBLE CANDIDATES:\n");
+        {
+                unsigned long i;
+                for (i = 0UL; i < cand_count; i++) {
+                        const struct cross_candidate *c = &cand[i];
+                        printf("  %s %s+%06lo -> %s+%06lo : %lu WORDS; "
+                            "SAVE=%lu",
+                            c->one_jrst ? "JRST-COLD" : "ZERO     ",
+                            inputs[c->donor].name, c->donor_off,
+                            inputs[c->anchor].name, c->anchor_off,
+                            c->words, c->save);
+                        if (c->one_jrst)
+                                printf("; COLD=%s", c->function);
+                        putchar('\n');
+                }
+        }
+
+        printf("\nSELECTED NON-OVERLAPPING DONOR PLAN:\n");
+        {
+                unsigned long i = 0UL;
+                unsigned long selected = 0UL;
+                unsigned long saved = 0UL;
+
+                while (i < cand_count) {
+                        unsigned long j = i;
+                        unsigned long n;
+                        unsigned long *dp;
+                        long *prev;
+                        unsigned char *take;
+                        unsigned long k;
+
+                        while (j < cand_count &&
+                            cand[j].donor == cand[i].donor)
+                                j++;
+                        n = j - i;
+                        dp = (unsigned long *)calloc((size_t)(n + 1UL),
+                            sizeof(*dp));
+                        prev = (long *)malloc((size_t)n * sizeof(*prev));
+                        take = (unsigned char *)calloc((size_t)(n + 1UL), 1U);
+                        if (dp == NULL || prev == NULL || take == NULL) {
+                                free(dp);
+                                free(prev);
+                                free(take);
+                                free(cand);
+                                return 1;
+                        }
+                        for (k = 0UL; k < n; k++) {
+                                long p = (long)k - 1L;
+                                while (p >= 0L &&
+                                    cand[i + (unsigned long)p].donor_off +
+                                    cand[i + (unsigned long)p].words >
+                                    cand[i + k].donor_off)
+                                        p--;
+                                prev[k] = p;
+                                {
+                                        unsigned long yes = cand[i + k].save +
+                                            dp[(unsigned long)(p + 1L)];
+                                        unsigned long no = dp[k];
+                                        if (yes > no) {
+                                                dp[k + 1UL] = yes;
+                                                take[k + 1UL] = 1U;
+                                        } else {
+                                                dp[k + 1UL] = no;
+                                        }
+                                }
+                        }
+                        k = n;
+                        while (k != 0UL) {
+                                if (take[k]) {
+                                        const struct cross_candidate *c =
+                                            &cand[i + k - 1UL];
+                                        printf("  SELECT %s %s+%06lo -> "
+                                            "%s+%06lo : SAVE=%lu",
+                                            c->one_jrst ? "JRST-COLD" : "ZERO",
+                                            inputs[c->donor].name, c->donor_off,
+                                            inputs[c->anchor].name, c->anchor_off,
+                                            c->save);
+                                        if (c->one_jrst)
+                                                printf("; COLD=%s", c->function);
+                                        putchar('\n');
+                                        saved += c->save;
+                                        selected++;
+                                        k = (unsigned long)(prev[k - 1UL] + 1L);
+                                } else {
+                                        k--;
+                                }
+                        }
+                        free(dp);
+                        free(prev);
+                        free(take);
+                        i = j;
+                }
+                printf("CROSS-DOMAIN TOTAL: %lu FOLDS; %lu WORDS PROJECTED "
+                    "PERMANENT SAVING\n", selected, saved);
+        }
+        printf("POLICY REJECTIONS: %lu ONE-JRST SUBRUNS NOT ON COLD LIST; "
+            "%lu SUBRUNS NOT SAFE FOR ONE-JRST REPLACEMENT.\n",
+            rejected_hot, rejected_shape);
+        printf("RAW ELIGIBLE WORD-SCORE BEFORE OVERLAP: ZERO=%lu; "
+            "JRST-COLD=%lu.\n", raw_zero, raw_cold);
+        printf("ANALYSIS ONLY: NO CROSS-DOMAIN FOLD PLAN IS EMITTED.\n");
+        free(cand);
         return 0;
 }
 
@@ -386,6 +979,9 @@ int
 main(int argc, char **argv)
 {
         struct input *inputs;
+        struct name_list anchor_names;
+        struct name_list cold_names;
+        struct removed_list removed;
         unsigned long min_words = DEFAULT_MIN_WORDS;
         unsigned long candidates = 0UL;
         unsigned long whole_words = 0UL;
@@ -397,9 +993,17 @@ main(int argc, char **argv)
         unsigned long group_cap = 0UL;
         int first = 1;
         const char *plan_name = NULL;
+        const char *cold_name = NULL;
+        const char *removed_name = NULL;
         int count;
+        int donor_count;
+        int anchor_count;
         int ai;
         int bi;
+
+        memset(&anchor_names, 0, sizeof(anchor_names));
+        memset(&cold_names, 0, sizeof(cold_names));
+        memset(&removed, 0, sizeof(removed));
 
         while (first < argc && argv[first][0] == '-') {
                 if (strcmp(argv[first], "-m") == 0 && first + 1 < argc) {
@@ -415,27 +1019,106 @@ main(int argc, char **argv)
                     first + 1 < argc) {
                         plan_name = argv[first + 1];
                         first += 2;
+                } else if (strcmp(argv[first], "-a") == 0 &&
+                    first + 1 < argc) {
+                        if (name_list_add(&anchor_names,
+                            argv[first + 1]) != 0) {
+                                name_list_free(&anchor_names);
+                                return 1;
+                        }
+                        first += 2;
+                } else if (strcmp(argv[first], "-C") == 0 &&
+                    first + 1 < argc) {
+                        cold_name = argv[first + 1];
+                        first += 2;
+                } else if (strcmp(argv[first], "-x") == 0 &&
+                    first + 1 < argc) {
+                        removed_name = argv[first + 1];
+                        first += 2;
                 } else {
                         usage();
+                        name_list_free(&anchor_names);
                         return 2;
                 }
         }
         if (argc - first < 1) {
                 usage();
+                name_list_free(&anchor_names);
                 return 2;
         }
-        count = argc - first;
-        inputs = (struct input *)calloc((size_t)count, sizeof(*inputs));
-        if (inputs == NULL)
+        donor_count = argc - first;
+        anchor_count = (int)anchor_names.count;
+        if (anchor_count != 0 && plan_name != NULL) {
+                fprintf(stderr,
+                    "p10fold: -P is not supported in cross-domain analysis\n");
+                name_list_free(&anchor_names);
+                return 2;
+        }
+        if (anchor_count == 0 && (cold_name != NULL || removed_name != NULL)) {
+                fprintf(stderr,
+                    "p10fold: -C and -x require at least one -a anchor\n");
+                name_list_free(&anchor_names);
+                return 2;
+        }
+        if (cold_name != NULL && load_name_list(&cold_names, cold_name) != 0) {
+                name_list_free(&anchor_names);
+                name_list_free(&cold_names);
                 return 1;
-        for (ai = 0; ai < count; ai++) {
-                if (load_input(&inputs[ai], argv[first + ai]) != 0) {
+        }
+        if (removed_name != NULL &&
+            load_removed_plan(&removed, removed_name) != 0) {
+                name_list_free(&anchor_names);
+                name_list_free(&cold_names);
+                removed_list_free(&removed);
+                return 1;
+        }
+        count = anchor_count + donor_count;
+        inputs = (struct input *)calloc((size_t)count, sizeof(*inputs));
+        if (inputs == NULL) {
+                name_list_free(&anchor_names);
+                name_list_free(&cold_names);
+                removed_list_free(&removed);
+                return 1;
+        }
+        for (ai = 0; ai < anchor_count; ai++) {
+                if (load_input(&inputs[ai], anchor_names.name[ai]) != 0) {
                         while (ai-- > 0)
                                 free_input(&inputs[ai]);
                         free(inputs);
+                        name_list_free(&anchor_names);
+                        name_list_free(&cold_names);
+                        removed_list_free(&removed);
                         return 1;
                 }
         }
+        for (ai = 0; ai < donor_count; ai++) {
+                if (load_input(&inputs[anchor_count + ai],
+                    argv[first + ai]) != 0) {
+                        int j;
+                        for (j = 0; j < anchor_count + ai; j++)
+                                free_input(&inputs[j]);
+                        free(inputs);
+                        name_list_free(&anchor_names);
+                        name_list_free(&cold_names);
+                        removed_list_free(&removed);
+                        return 1;
+                }
+        }
+        if (anchor_count != 0) {
+                int rc = cross_analyze(inputs, count, anchor_count, min_words,
+                    &cold_names, &removed);
+                for (ai = 0; ai < count; ai++)
+                        free_input(&inputs[ai]);
+                free(inputs);
+                name_list_free(&anchor_names);
+                name_list_free(&cold_names);
+                removed_list_free(&removed);
+                return rc;
+        }
+
+        name_list_free(&anchor_names);
+        name_list_free(&cold_names);
+        removed_list_free(&removed);
 
         printf("P10FOLD DOBJ1 DUPLICATE TEXT ANALYSIS\n");
         printf("MINIMUM RUN: %lu WORDS\n\n", min_words);
