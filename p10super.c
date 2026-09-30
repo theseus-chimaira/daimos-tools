@@ -1831,6 +1831,14 @@ score_better(const struct plan_score *a, const struct plan_score *b)
 {
         if (a->fold_save != b->fold_save)
                 return a->fold_save > b->fold_save;
+        /*
+         * Exact-run span is an exploration hint, not a size result.  Do not
+         * recommend source churn when no selected candidate has a proven
+         * zero-cost fold saving.  Once a plan is size-positive, use span and
+         * candidate count only to break equal-saving ties.
+         */
+        if (a->fold_save == 0UL)
+                return 0;
         if (a->span != b->span)
                 return a->span > b->span;
         return a->count > b->count;
