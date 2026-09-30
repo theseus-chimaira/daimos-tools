@@ -1774,6 +1774,15 @@ main(int argc, char **argv)
                          */
                         for (len = 2; len <= n; len++) {
                                 struct region *q;
+                                /*
+                                 * Reordering across an alternate entry would
+                                 * change what a branch or exported label sees.
+                                 * Once a later word is an entry, no longer
+                                 * prefix from this start is source-rewriteable.
+                                 */
+                                if (has_text_entry(&in[ai].obj,
+                                    start + len - 1UL))
+                                        break;
                                 if (nr == cap) {
                                         unsigned long nc = cap ? cap * 2 : 256;
                                         q = realloc(r, (size_t)nc * sizeof(*r));
