@@ -1395,10 +1395,15 @@ static int
 common_rename_rec(const struct region *a, const struct region *b,
     const unsigned int ap[MAX_REGION], const unsigned int bp[MAX_REGION],
     unsigned int adone, unsigned int bdone, unsigned long depth,
-    int amap[16], int bmap[16])
+    int amap[16], int bmap[16], unsigned int aorder[MAX_REGION],
+    unsigned int border[MAX_REGION], int out_amap[16], int out_bmap[16])
 {
         unsigned long i, j;
-        if (depth == a->n) return 1;
+        if (depth == a->n) {
+                memcpy(out_amap, amap, 16U * sizeof(out_amap[0]));
+                memcpy(out_bmap, bmap, 16U * sizeof(out_bmap[0]));
+                return 1;
+        }
         for (i = 0; i < a->n; i++) {
                 if ((adone & (1U << i)) || (ap[i] & ~adone)) continue;
                 for (j = 0; j < b->n; j++) {
@@ -1414,9 +1419,11 @@ common_rename_rec(const struct region *a, const struct region *b,
                                 continue;
                         if (!mapped_insn_equal(&a->insn[i], &b->insn[j],
                             am, bm)) continue;
+                        aorder[depth] = (unsigned int)i;
+                        border[depth] = (unsigned int)j;
                         if (common_rename_rec(a, b, ap, bp,
                             adone | (1U << i), bdone | (1U << j), depth + 1,
-                            am, bm))
+                            am, bm, aorder, border, out_amap, out_bmap))
                                 return 1;
                 }
         }
@@ -1424,7 +1431,9 @@ common_rename_rec(const struct region *a, const struct region *b,
 }
 
 static int
-has_common_renamed_schedule(const struct region *a, const struct region *b)
+find_common_renamed_schedule(const struct region *a, const struct region *b,
+    unsigned int aorder[MAX_REGION], unsigned int border[MAX_REGION],
+    int out_amap[16], int out_bmap[16])
 {
         unsigned int ap[MAX_REGION], bp[MAX_REGION];
         int amap[16], bmap[16];
@@ -1433,13 +1442,15 @@ has_common_renamed_schedule(const struct region *a, const struct region *b)
         build_pred(a->insn, a->n, ap); build_pred(b->insn, b->n, bp);
         for (i = 0; i < 16; i++) amap[i] = bmap[i] = -1;
         amap[0] = bmap[0] = 0; amap[15] = bmap[15] = 15;
-        return common_rename_rec(a, b, ap, bp, 0, 0, 0, amap, bmap);
+        return common_rename_rec(a, b, ap, bp, 0, 0, 0, amap, bmap,
+            aorder, border, out_amap, out_bmap);
 }
 
 static int
-has_common_zero_schedule(const struct region *a, const struct region *b)
+find_common_zero_schedule(const struct region *a, const struct region *b,
+    unsigned int aorder[MAX_REGION], unsigned int border[MAX_REGION])
 {
-        return find_common_schedule(a, b, zero_form_equal, NULL, NULL);
+        return find_common_schedule(a, b, zero_form_equal, aorder, border);
 }
 
 static void
@@ -1451,12 +1462,139 @@ print_order(const unsigned int order[MAX_REGION], unsigned long n)
                 printf("%s+%o", i == 0UL ? "" : " ", order[i]);
 }
 
+static unsigned long
+schedule_exact_span(const struct input *in, const struct region *a,
+    const struct region *b, unsigned long *leftp, unsigned long *rightp)
+{
+        const struct dobj_object *ao = &in[a->input].obj;
+        const struct dobj_object *bo = &in[b->input].obj;
+        unsigned long left = 0UL;
+        unsigned long right = 0UL;
+
+        /*
+         * The reconstructed common schedule proves the transformed region
+         * itself equal.  Extend only through unchanged neighboring words
+         * which are already relocation-equivalent.  This is deliberately a
+         * lower bound: p10fold may later find a still larger relative-local
+         * relocation match after actual source reassembly.
+         */
+        while (a->off > left && b->off > left &&
+            word_at_equal(ao, a->off - left - 1UL,
+                bo, b->off - left - 1UL))
+                left++;
+        while (a->off + a->n + right < ao->text_words &&
+            b->off + b->n + right < bo->text_words &&
+            word_at_equal(ao, a->off + a->n + right,
+                bo, b->off + b->n + right))
+                right++;
+        if (leftp != NULL)
+                *leftp = left;
+        if (rightp != NULL)
+                *rightp = right;
+        return left + a->n + right;
+}
+
+static int
+unconditional_end_at(const struct dobj_object *o, unsigned long off)
+{
+        unsigned int op;
+
+        if (off >= o->text_words)
+                return 0;
+        op = (unsigned int)((o->text[off].lh >> 9) & 0777UL);
+        return op == 0254U || op == 0263U; /* JRST / POPJ */
+}
+
+static int
+isolated_text_block(const struct dobj_object *o, unsigned long off,
+    unsigned long words)
+{
+        unsigned long i;
+
+        if (words == 0UL || off + words > o->text_words)
+                return 0;
+        if (off != 0UL && !unconditional_end_at(o, off - 1UL))
+                return 0;
+        if (!unconditional_end_at(o, off + words - 1UL))
+                return 0;
+        for (i = 0UL; i < o->symbol_count; i++) {
+                const struct dobj_symbol *s = &o->symbols[i];
+
+                if (s->kind == DOBJ_SYM_DEF && s->sec == DOBJ_SEC_TEXT &&
+                    s->value.rh > off && s->value.rh < off + words)
+                        return 0;
+        }
+        for (i = 0UL; i < o->reloc_count; i++) {
+                const struct dobj_reloc *r = &o->relocs[i];
+
+                if ((r->type == DOBJ_RELOC_LOCAL_RH18 ||
+                    r->type == DOBJ_RELOC_LOCAL_LH18) &&
+                    r->target_sec == DOBJ_SEC_TEXT &&
+                    r->addend.rh > off && r->addend.rh < off + words &&
+                    (r->loc_sec != DOBJ_SEC_TEXT || r->offset < off ||
+                    r->offset >= off + words))
+                        return 0;
+        }
+        return 1;
+}
+
+static int
+removable_text_block(const struct dobj_object *o, unsigned long off,
+    unsigned long words)
+{
+        return !has_named_text_entry(o, off) &&
+            isolated_text_block(o, off, words);
+}
+
+static int
+ranges_overlap(unsigned long aoff, unsigned long an,
+    unsigned long boff, unsigned long bn)
+{
+        return aoff < boff + bn && boff < aoff + an;
+}
+
+static unsigned long
+schedule_zero_fold_saving(const struct input *in, const struct region *a,
+    const struct region *b, unsigned long left, unsigned long right)
+{
+        const struct dobj_object *ao = &in[a->input].obj;
+        const struct dobj_object *bo = &in[b->input].obj;
+        unsigned long abase = a->off - left;
+        unsigned long bbase = b->off - left;
+        unsigned long span = left + a->n + right;
+        unsigned long best = 0UL;
+        unsigned long suboff;
+
+        for (suboff = 0UL; suboff + 4UL <= span; suboff++) {
+                unsigned long words;
+
+                for (words = 4UL; suboff + words <= span; words++) {
+                        int ar;
+                        int br;
+
+                        if (a->input == b->input &&
+                            ranges_overlap(abase + suboff, words,
+                                bbase + suboff, words))
+                                continue;
+                        ar = removable_text_block(ao, abase + suboff, words);
+                        br = removable_text_block(bo, bbase + suboff, words);
+                        if ((ar || br) && words > best)
+                                best = words;
+                }
+        }
+        return best;
+}
+
 static void
 print_schedule_rewrite(const struct input *in, const struct region *a,
     const struct region *b, const unsigned int aorder[MAX_REGION],
     const unsigned int border[MAX_REGION])
 {
         unsigned int identity[MAX_REGION];
+        unsigned long left, right;
+        unsigned long span = schedule_exact_span(in, a, b, &left, &right);
+        unsigned long fold_save = schedule_zero_fold_saving(in, a, b,
+            left, right);
         unsigned long i;
 
         for (i = 0UL; i < a->n; i++)
@@ -1465,8 +1603,10 @@ print_schedule_rewrite(const struct input *in, const struct region *a,
         print_source_location(stdout, &in[a->input], a->off);
         printf(" <=> ");
         print_source_location(stdout, &in[b->input], b->off);
-        printf(" : SAVE 0; FOLD-POTENTIAL %lu; COST=ZERO; "
-            "LEGAL=DEPENDENCY-DAG-COMMON-SCHEDULE\n", a->n);
+        printf(" : SAVE 0; EXPECTED-FOLD-SAVE %lu; "
+            "EXACT-RUN-POTENTIAL %lu (-%lu/+%lu); COST=ZERO; "
+            "LEGAL=DEPENDENCY-DAG-COMMON-SCHEDULE-SINGLE-ENTRY\n",
+            fold_save, span, left, right);
         printf("  A OLD ");
         print_order(identity, a->n);
         printf(" ; NEW ");
@@ -1477,6 +1617,82 @@ print_schedule_rewrite(const struct input *in, const struct region *a,
         printf(" ; NEW ");
         print_order(border, b->n);
         putchar('\n');
+}
+
+static void
+print_zero_rewrite(const struct input *in, const struct region *a,
+    const struct region *b, const unsigned int aorder[MAX_REGION],
+    const unsigned int border[MAX_REGION])
+{
+        unsigned int identity[MAX_REGION];
+        unsigned long i;
+
+        for (i = 0UL; i < a->n; i++)
+                identity[i] = (unsigned int)i;
+        printf("CANON ");
+        print_source_location(stdout, &in[a->input], a->off);
+        printf(" <=> ");
+        print_source_location(stdout, &in[b->input], b->off);
+        printf(" : SAVE 0; FOLD-POTENTIAL %lu; COST=ZERO; "
+            "LEGAL=DEPENDENCY-DAG-PLUS-UNLABELLED-ZERO-FORM\n", a->n);
+        printf("  A OLD ");
+        print_order(identity, a->n);
+        printf(" ; NEW ");
+        print_order(aorder, a->n);
+        putchar('\n');
+        printf("  B OLD ");
+        print_order(identity, b->n);
+        printf(" ; NEW ");
+        print_order(border, b->n);
+        putchar('\n');
+        printf("  FORM MOVEI-AC-0 -> SETZ-AC\n");
+}
+
+static void
+print_ac_map(const int amap[16])
+{
+        unsigned int ac;
+        int any = 0;
+
+        for (ac = 1U; ac < 15U; ac++) {
+                if (amap[ac] < 0 || amap[ac] == (int)ac)
+                        continue;
+                printf("%s%o->%o", any ? " " : "", ac,
+                    (unsigned int)amap[ac]);
+                any = 1;
+        }
+        if (!any)
+                printf("-");
+}
+
+static void
+print_rename_rewrite(const struct input *in, const struct region *a,
+    const struct region *b, const unsigned int aorder[MAX_REGION],
+    const unsigned int border[MAX_REGION], const int amap[16])
+{
+        unsigned int identity[MAX_REGION];
+        unsigned long i;
+
+        for (i = 0UL; i < a->n; i++)
+                identity[i] = (unsigned int)i;
+        printf("RENAME-REWRITE ");
+        print_source_location(stdout, &in[a->input], a->off);
+        printf(" <=> ");
+        print_source_location(stdout, &in[b->input], b->off);
+        printf(" : SAVE 0; FOLD-POTENTIAL %lu; COST=ZERO; "
+            "LEGAL=DEPENDENCY-DAG-PLUS-REGION-LOCAL-AC\n", a->n);
+        printf("  A OLD ");
+        print_order(identity, a->n);
+        printf(" ; NEW ");
+        print_order(aorder, a->n);
+        printf(" ; RENAME ");
+        print_ac_map(amap);
+        putchar('\n');
+        printf("  B OLD ");
+        print_order(identity, b->n);
+        printf(" ; NEW ");
+        print_order(border, b->n);
+        printf(" ; RENAME -\n");
 }
 
 static int
@@ -1819,15 +2035,18 @@ main(int argc, char **argv)
                         int renamed;
                         unsigned int aorder[MAX_REGION];
                         unsigned int border[MAX_REGION];
+                        int amap[16], bmap[16];
                         if (regions_overlap(&r[i], &r[j]) ||
                             r[i].n != r[j].n)
                                 continue;
                         sched = find_common_schedule(&r[i], &r[j],
                             insn_equal, aorder, border);
                         zero = !sched &&
-                            has_common_zero_schedule(&r[i], &r[j]);
+                            find_common_zero_schedule(&r[i], &r[j],
+                            aorder, border);
                         renamed = !sched && !zero &&
-                            has_common_renamed_schedule(&r[i], &r[j]);
+                            find_common_renamed_schedule(&r[i], &r[j],
+                            aorder, border, amap, bmap);
                         if (!sched && !zero && !renamed) continue;
                         /* Ignore regions already byte-identical in source order. */
                         int identical = 1;
@@ -1841,6 +2060,12 @@ main(int argc, char **argv)
                         if (sched)
                                 print_schedule_rewrite(in, &r[i], &r[j],
                                     aorder, border);
+                        else if (zero)
+                                print_zero_rewrite(in, &r[i], &r[j],
+                                    aorder, border);
+                        else
+                                print_rename_rewrite(in, &r[i], &r[j],
+                                    aorder, border, amap);
                         printf("%s%s %s+%06lo <=> %s+%06lo : %lu WORDS\n",
                             (r[i].tail_candidate && r[j].tail_candidate) ?
                                 "TAIL-" : "",
