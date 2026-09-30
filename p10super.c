@@ -16,6 +16,7 @@
 #define MAX_REGION 8UL
 #define F_FIXED 1U
 #define MEM_UNKNOWN (-1)
+#define MEM_AC      (-2)
 
 struct block {
         unsigned long start;
@@ -1112,8 +1113,8 @@ memory_id(const struct dobj_object *o, unsigned long off,
 {
         const struct dobj_reloc *r = rh_reloc(o, off);
         if (r == NULL) {
-                *kind = DOBJ_SEC_ABS;
                 *id = o->text[off].rh;
+                *kind = *id < 020UL ? MEM_AC : DOBJ_SEC_ABS;
                 return 1;
         }
         if (r->type == DOBJ_RELOC_LOCAL_RH18) {
@@ -1128,6 +1129,31 @@ memory_id(const struct dobj_object *o, unsigned long off,
          * false match.
          */
         return 0;
+}
+
+/*
+ * PDP-6/PDP-10 effective addresses 0..17 name the accumulator file.  Once a
+ * direct memory operand has been decoded as MEM_AC, fold that access into the
+ * ordinary AC dependency masks.  Keeping it as an unrelated memory identity
+ * would incorrectly allow a load/store through AC N to cross an instruction
+ * which writes/reads AC N.
+ */
+static void
+normalize_ac_memory(struct insn *d)
+{
+        unsigned long bit;
+
+        if (d->mem_kind != MEM_AC)
+                return;
+        bit = 1UL << d->mem_id;
+        if (d->mem_read)
+                d->reads |= bit;
+        if (d->mem_write)
+                d->writes |= bit;
+        d->mem_read = 0;
+        d->mem_write = 0;
+        d->mem_kind = 0;
+        d->mem_id = 0UL;
 }
 
 /*
@@ -1209,6 +1235,7 @@ decode_safe(const struct dobj_object *o, unsigned long off, struct insn *d)
                     op == 0434 || op == 0444)
                         d->reads = bit;
                 d->writes = bit;
+                normalize_ac_memory(d);
                 return 1;
         case 0500: case 0504: case 0540: case 0544: /* HLL/HRL/HRR/HLR */
                 if (!memory_id(o, off, &d->mem_kind, &d->mem_id))
@@ -1216,6 +1243,7 @@ decode_safe(const struct dobj_object *o, unsigned long off, struct insn *d)
                 d->mem_read = 1;
                 d->reads = bit;
                 d->writes = bit;
+                normalize_ac_memory(d);
                 return 1;
         /*
          * Z/O/E halfword loads determine the whole AC: the untouched half is
@@ -1230,6 +1258,7 @@ decode_safe(const struct dobj_object *o, unsigned long off, struct insn *d)
                         return 0;
                 d->mem_read = 1;
                 d->writes = bit;
+                normalize_ac_memory(d);
                 return 1;
         case 0511: case 0515: case 0521: case 0525:
         case 0531: case 0535:
@@ -1243,23 +1272,27 @@ decode_safe(const struct dobj_object *o, unsigned long off, struct insn *d)
                         return 0;
                 d->mem_write = 1;
                 d->reads = bit;
+                normalize_ac_memory(d);
                 return 1;
         case 0402: case 0476: /* SETZM/SETOM */
                 if (!memory_id(o, off, &d->mem_kind, &d->mem_id))
                         return 0;
                 d->mem_write = 1;
+                normalize_ac_memory(d);
                 return 1;
         case 0403: case 0477: /* SETZB/SETOB */
                 if (!memory_id(o, off, &d->mem_kind, &d->mem_id))
                         return 0;
                 d->mem_write = 1;
                 d->writes = bit;
+                normalize_ac_memory(d);
                 return 1;
         case 0406: case 0432: case 0436: case 0446: /* ANDM/XORM/IORM/EQVM */
                 if (!memory_id(o, off, &d->mem_kind, &d->mem_id))
                         return 0;
                 d->mem_read = d->mem_write = 1;
                 d->reads = bit;
+                normalize_ac_memory(d);
                 return 1;
         case 0407: case 0433: case 0437: case 0447: /* ANDB/XORB/IORB/EQVB */
                 if (!memory_id(o, off, &d->mem_kind, &d->mem_id))
@@ -1267,6 +1300,7 @@ decode_safe(const struct dobj_object *o, unsigned long off, struct insn *d)
                 d->mem_read = d->mem_write = 1;
                 d->reads = bit;
                 d->writes = bit;
+                normalize_ac_memory(d);
                 return 1;
         /*
          * Comparison/test/skip instructions are useful structural anchors.
@@ -1281,7 +1315,9 @@ decode_safe(const struct dobj_object *o, unsigned long off, struct insn *d)
         case 0310: case 0311: case 0312: case 0313:
         case 0314: case 0315: case 0316: case 0317: /* CAM */
                 if (!memory_id(o, off, &d->mem_kind, &d->mem_id)) return 0;
-                d->reads = bit; d->mem_read = 1; d->flags = F_FIXED; return 1;
+                d->reads = bit; d->mem_read = 1; d->flags = F_FIXED;
+                normalize_ac_memory(d);
+                return 1;
         case 0600: case 0601: case 0602: case 0603:
         case 0604: case 0605: case 0606: case 0607:
         case 0610: case 0611: case 0612: case 0613:
