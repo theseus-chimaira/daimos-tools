@@ -546,7 +546,6 @@ static const struct daimos_uuo_veneer daimos_uuo_veneers[] = {
     { "dsys_exit",        0040UL, 1UL },
     { "dsys_open",        0041UL, 1UL },
     { "dsys_close",       0042UL, 1UL },
-    { "dsys_write_chars", 0043UL, 1UL },
     { "dsys_chdir",       0045UL, 1UL },
     { "dsys_getcwd",      0046UL, 1UL },
     { "dsys_stat",        0047UL, 1UL },

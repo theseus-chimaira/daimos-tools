@@ -15,8 +15,10 @@ symbol-relative source location, the original and replacement assembler form,
 the exact one-word saving, zero execution-cost delta, and the legality proof.
 For scheduling-equivalent regions it emits `REORDER` records naming both fold
 partners and the concrete old/new instruction-offset order on each side.
-Reordering itself claims no size saving; `FOLD-POTENTIAL` is only the region
-size which must still be reassembled and verified by `p10fold`.
+Reordering itself claims no direct size saving.  The record includes the
+conservative exact-run span around the normalized region and any zero-cost
+`p10fold` saving already provable from that surrounding object text; final
+source changes must still be reassembled and verified by `p10fold`.
 
 The tool is advisory: `SCHEDULE` results require no AC renaming. `RENAME`
 results require a consistent AC renaming and are emitted only when each
@@ -25,7 +27,8 @@ value is killed before use and its outgoing value is killed before a later
 read. Unknown instructions and control-flow boundaries stop that proof.
 `CANON-ZERO` reports equal-cost normalization between an unlabelled
 `MOVEI AC,0` and `SETZ AC`; labelled/alternate-entry instructions are not
-rewritten. The peephole pass also reports strictly smaller PDP-10 forms such as
+rewritten.  `CANON` records show the legal common order and zero-form rewrite;
+`RENAME-REWRITE` records show the proven region-local AC mapping. The peephole pass also reports strictly smaller PDP-10 forms such as
 `CAIN AC,0 ; JRST` -> `JUMPE` and increment/decrement plus jump -> AOJ/SOJ.
 CFG comparison also recognizes equivalent subgraphs whose terminal
 JUMP/AOJ/SOJ conditions are complementary and whose successors are therefore
@@ -78,7 +81,7 @@ HOST UNIX COMMANDS AND FILE NAMES ARE PRINTED IN UPPER CASE BECAUSE THIS DOCUMEN
 - LOGSTORE - D6FS LOGSTORE MAINTENANCE TOOL.
 - D6SWAP - D6FS SWAP AREA INSPECTION AND MAINTENANCE TOOL.
 - MKDT - SIMH DECTAPE IMAGE BUILDER.
-- MKTSFS - MINIMAL TSFS DECTAPE SET BUILDER.
+- MKTSFS - TSFS DECTAPE SET AND MANIFEST IMAGE BUILDER.
 - TSFSCHECK - TSFS MEMBER/DESCRIPTOR AND TABLE-DIRECTORY VERIFIER.
 - MKSTREAM - STAGE1 STREAM BUILDER.
 - MKTAP - SIMH 7 TRACK MAGNETIC TAPE RECORD BUILDER.
