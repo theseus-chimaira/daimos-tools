@@ -493,13 +493,13 @@ static void parse_file_spec(const char *spec)
         idx = add_node(parent, leaf, D6FS_TYPE_REG, mode);
         if (strcmp(enc, "dxr") == 0) {
                 nodes[idx].data = load_dxr(host, &nodes[idx].data_words);
-                nodes[idx].tail = nodes[idx].data_words == 0U ? 0U : 4U;
+                nodes[idx].tail = 0U;
         } else if (strcmp(enc, "words") == 0) {
                 nodes[idx].data = load_words(host, &nodes[idx].data_words);
-                nodes[idx].tail = nodes[idx].data_words == 0U ? 0U : 4U;
+                nodes[idx].tail = 0U;
         } else if (strcmp(enc, "binwords") == 0) {
                 nodes[idx].data = load_binwords(host, &nodes[idx].data_words);
-                nodes[idx].tail = nodes[idx].data_words == 0U ? 0U : 4U;
+                nodes[idx].tail = 0U;
         } else {
                 die("unsupported encoding (use dxr, words or binwords)");
         }
@@ -565,16 +565,17 @@ static void parse_symlink_spec(const char *spec)
         if (find_child(parent, leaf) >= 0)
                 die("duplicate filesystem path");
         idx = add_node(parent, leaf, D6FS_TYPE_SYMLINK, mode);
-        nodes[idx].data_words = (chars + 5U) / 6U;
-        nodes[idx].tail = chars - (nodes[idx].data_words - 1U) * 6U;
+        nodes[idx].data_words = 1U + (chars + 5U) / 6U;
+        nodes[idx].tail = 0U;
         nodes[idx].data = calloc(nodes[idx].data_words, sizeof(uint64_t));
         if (nodes[idx].data == NULL)
                 die("out of memory");
+        nodes[idx].data[0] = (uint64_t)chars;
         for (i = 0U; i < chars; ++i) {
                 c = (unsigned char)target[i];
                 if (c < 040U || c > 0137U)
                         die("symlink target is not SIXBIT representable");
-                wi = i / 6U;
+                wi = 1U + i / 6U;
                 shift = 30U - (i % 6U) * 6U;
                 nodes[idx].data[wi] |= (uint64_t)(c - 040U) << shift;
         }
@@ -734,7 +735,7 @@ static void build_directories(void)
                         if (nodes[j].parent == i)
                                 ++children;
                 nodes[i].data_words = children * DIRENT_WORDS;
-                nodes[i].tail = nodes[i].data_words == 0U ? 0U : 4U;
+                nodes[i].tail = 0U;
                 if (nodes[i].data_words == 0U)
                         continue;
                 nodes[i].data = calloc(nodes[i].data_words, sizeof(uint64_t));
