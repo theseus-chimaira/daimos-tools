@@ -61,6 +61,46 @@ struct region {
         unsigned long renameable;
 };
 
+enum candidate_kind {
+        CAND_SCHEDULE,
+        CAND_ZERO,
+        CAND_RENAME
+};
+
+struct normalization_action {
+        int input;
+        unsigned long off;
+        unsigned long n;
+        unsigned int order[MAX_REGION];
+        int zero_form;
+        int rename[16];
+};
+
+struct candidate {
+        enum candidate_kind kind;
+        unsigned long a_region;
+        unsigned long b_region;
+        struct normalization_action action[2];
+        unsigned long fold_save;
+        unsigned long span;
+};
+
+struct plan_score {
+        unsigned long fold_save;
+        unsigned long span;
+        unsigned long count;
+};
+
+struct plan_search {
+        const struct candidate *candidate;
+        unsigned long count;
+        unsigned char *current;
+        unsigned char *best;
+        unsigned long *suffix_fold;
+        unsigned long *suffix_span;
+        struct plan_score best_score;
+};
+
 struct guard_shape {
         const struct block *guard;
         const struct block *taken;
@@ -1703,6 +1743,236 @@ regions_overlap(const struct region *a, const struct region *b)
         return a->off < b->off + b->n && b->off < a->off + a->n;
 }
 
+static int
+region_needs_zero_form(const struct region *r)
+{
+        unsigned long i;
+
+        for (i = 0UL; i < r->n; i++) {
+                const struct insn *d = &r->insn[i];
+                unsigned int op = (unsigned int)((d->word.lh >> 9) & 0777UL);
+
+                if (op == 0201U && d->word.rh == 0UL &&
+                    (d->word.lh & 037UL) == 0UL &&
+                    half_reloc(d->obj, d->off, 0) == NULL &&
+                    !has_text_entry(d->obj, d->off))
+                        return 1;
+        }
+        return 0;
+}
+
+static void
+action_init(struct normalization_action *a, const struct region *r,
+    const unsigned int order[MAX_REGION], int zero_form,
+    const int rename[16])
+{
+        unsigned int i;
+
+        memset(a, 0, sizeof(*a));
+        a->input = r->input;
+        a->off = r->off;
+        a->n = r->n;
+        for (i = 0U; i < (unsigned int)r->n; i++)
+                a->order[i] = order[i];
+        a->zero_form = zero_form;
+        for (i = 0U; i < 16U; i++)
+                a->rename[i] = rename == NULL ? -1 : rename[i];
+}
+
+static int
+action_equal(const struct normalization_action *a,
+    const struct normalization_action *b)
+{
+        unsigned int i;
+
+        if (a->input != b->input || a->off != b->off || a->n != b->n ||
+            a->zero_form != b->zero_form)
+                return 0;
+        for (i = 0U; i < (unsigned int)a->n; i++)
+                if (a->order[i] != b->order[i])
+                        return 0;
+        for (i = 0U; i < 16U; i++)
+                if (a->rename[i] != b->rename[i])
+                        return 0;
+        return 1;
+}
+
+static int
+action_overlap(const struct normalization_action *a,
+    const struct normalization_action *b)
+{
+        if (a->input != b->input)
+                return 0;
+        return a->off < b->off + b->n && b->off < a->off + a->n;
+}
+
+static int
+candidate_conflict(const struct candidate *a, const struct candidate *b)
+{
+        unsigned int ai, bi;
+
+        for (ai = 0U; ai < 2U; ai++)
+                for (bi = 0U; bi < 2U; bi++) {
+                        const struct normalization_action *aa = &a->action[ai];
+                        const struct normalization_action *ba = &b->action[bi];
+
+                        if (!action_overlap(aa, ba))
+                                continue;
+                        if (aa->off == ba->off && aa->n == ba->n &&
+                            action_equal(aa, ba))
+                                continue;
+                        return 1;
+                }
+        return 0;
+}
+
+static int
+score_better(const struct plan_score *a, const struct plan_score *b)
+{
+        if (a->fold_save != b->fold_save)
+                return a->fold_save > b->fold_save;
+        if (a->span != b->span)
+                return a->span > b->span;
+        return a->count > b->count;
+}
+
+static int
+candidate_fits(const struct plan_search *s, unsigned long index)
+{
+        unsigned long i;
+
+        for (i = 0UL; i < index; i++)
+                if (s->current[i] &&
+                    candidate_conflict(&s->candidate[i],
+                        &s->candidate[index]))
+                        return 0;
+        return 1;
+}
+
+static void
+plan_search_rec(struct plan_search *s, unsigned long index,
+    struct plan_score score)
+{
+        if (index == s->count) {
+                if (score_better(&score, &s->best_score)) {
+                        s->best_score = score;
+                        memcpy(s->best, s->current,
+                            (size_t)s->count * sizeof(s->best[0]));
+                }
+                return;
+        }
+
+        if (score.fold_save + s->suffix_fold[index] <
+            s->best_score.fold_save)
+                return;
+        if (score.fold_save + s->suffix_fold[index] ==
+            s->best_score.fold_save &&
+            score.span + s->suffix_span[index] < s->best_score.span)
+                return;
+
+        if (candidate_fits(s, index)) {
+                struct plan_score next = score;
+                s->current[index] = 1U;
+                next.fold_save += s->candidate[index].fold_save;
+                next.span += s->candidate[index].span;
+                next.count++;
+                plan_search_rec(s, index + 1UL, next);
+                s->current[index] = 0U;
+        }
+        plan_search_rec(s, index + 1UL, score);
+}
+
+static int
+select_global_candidates(const struct candidate *candidate, unsigned long n,
+    unsigned char **selectedp, struct plan_score *scorep)
+{
+        struct plan_search s;
+        struct plan_score zero;
+        unsigned long i;
+
+        memset(&s, 0, sizeof(s));
+        memset(&zero, 0, sizeof(zero));
+        s.candidate = candidate;
+        s.count = n;
+        if (n == 0UL) {
+                *selectedp = NULL;
+                *scorep = zero;
+                return 0;
+        }
+        s.current = (unsigned char *)calloc((size_t)n, 1U);
+        s.best = (unsigned char *)calloc((size_t)n, 1U);
+        s.suffix_fold = (unsigned long *)calloc((size_t)(n + 1UL),
+            sizeof(*s.suffix_fold));
+        s.suffix_span = (unsigned long *)calloc((size_t)(n + 1UL),
+            sizeof(*s.suffix_span));
+        if (s.current == NULL || s.best == NULL || s.suffix_fold == NULL ||
+            s.suffix_span == NULL) {
+                free(s.current); free(s.best);
+                free(s.suffix_fold); free(s.suffix_span);
+                return -1;
+        }
+        for (i = n; i-- > 0UL; ) {
+                s.suffix_fold[i] = s.suffix_fold[i + 1UL] +
+                    candidate[i].fold_save;
+                s.suffix_span[i] = s.suffix_span[i + 1UL] +
+                    candidate[i].span;
+        }
+        plan_search_rec(&s, 0UL, zero);
+        *selectedp = s.best;
+        *scorep = s.best_score;
+        free(s.current);
+        free(s.suffix_fold);
+        free(s.suffix_span);
+        return 0;
+}
+
+static int
+candidate_add(struct candidate **cp, unsigned long *np, unsigned long *capp,
+    enum candidate_kind kind, unsigned long ar, unsigned long br,
+    const struct region *a, const struct region *b,
+    const unsigned int aorder[MAX_REGION],
+    const unsigned int border[MAX_REGION], const int amap[16],
+    unsigned long fold_save, unsigned long span)
+{
+        struct candidate *c;
+        unsigned long nc;
+        int azero = 0;
+        int bzero = 0;
+
+        if (*np == *capp) {
+                nc = *capp ? *capp * 2UL : 32UL;
+                c = (struct candidate *)realloc(*cp,
+                    (size_t)nc * sizeof(**cp));
+                if (c == NULL)
+                        return -1;
+                *cp = c;
+                *capp = nc;
+        }
+        c = &(*cp)[*np];
+        memset(c, 0, sizeof(*c));
+        c->kind = kind;
+        c->a_region = ar;
+        c->b_region = br;
+        c->fold_save = fold_save;
+        c->span = span;
+        if (kind == CAND_ZERO) {
+                azero = region_needs_zero_form(a);
+                bzero = region_needs_zero_form(b);
+        }
+        action_init(&c->action[0], a, aorder, azero,
+            kind == CAND_RENAME ? amap : NULL);
+        action_init(&c->action[1], b, border, bzero, NULL);
+        (*np)++;
+        return 0;
+}
+
+static const char *
+candidate_name(enum candidate_kind kind)
+{
+        return kind == CAND_SCHEDULE ? "REORDER" :
+            (kind == CAND_ZERO ? "CANON" : "RENAME-REWRITE");
+}
+
 int
 main(int argc, char **argv)
 {
@@ -1713,6 +1983,10 @@ main(int argc, char **argv)
         unsigned long zero_matches = 0, zero_words = 0;
         unsigned long rename_matches = 0, rename_words = 0;
         unsigned long peephole_words = 0;
+        struct candidate *candidate = NULL;
+        unsigned long candidate_count = 0UL, candidate_cap = 0UL;
+        unsigned char *selected = NULL;
+        struct plan_score plan_score;
         int ni, ai;
 
         if (argc < 2) {
@@ -2036,6 +2310,8 @@ main(int argc, char **argv)
                         unsigned int aorder[MAX_REGION];
                         unsigned int border[MAX_REGION];
                         int amap[16], bmap[16];
+                        unsigned long left, right, span, fold_save;
+                        enum candidate_kind kind;
                         if (regions_overlap(&r[i], &r[j]) ||
                             r[i].n != r[j].n)
                                 continue;
@@ -2057,6 +2333,18 @@ main(int argc, char **argv)
                                     in[r[j].input].obj.text[r[j].off+k].rh)
                                         identical = 0;
                         if (identical) continue;
+                        span = schedule_exact_span(in, &r[i], &r[j],
+                            &left, &right);
+                        fold_save = schedule_zero_fold_saving(in, &r[i],
+                            &r[j], left, right);
+                        kind = sched ? CAND_SCHEDULE :
+                            (zero ? CAND_ZERO : CAND_RENAME);
+                        if (candidate_add(&candidate, &candidate_count,
+                            &candidate_cap, kind, i, j, &r[i], &r[j],
+                            aorder, border, amap, fold_save, span) != 0) {
+                                fprintf(stderr, "p10super: out of memory\n");
+                                return 1;
+                        }
                         if (sched)
                                 print_schedule_rewrite(in, &r[i], &r[j],
                                     aorder, border);
@@ -2082,6 +2370,30 @@ main(int argc, char **argv)
                                 rename_matches++; rename_words += r[i].n;
                         }
                 }
+        memset(&plan_score, 0, sizeof(plan_score));
+        if (select_global_candidates(candidate, candidate_count, &selected,
+            &plan_score) != 0) {
+                fprintf(stderr, "p10super: out of memory\n");
+                return 1;
+        }
+        printf("GLOBAL-PLAN: %lu/%lu CANDIDATES; EXPECTED-FOLD-SAVE-SCORE %lu; "
+            "EXACT-RUN-SCORE %lu\n", plan_score.count, candidate_count,
+            plan_score.fold_save, plan_score.span);
+        for (unsigned long i = 0UL; i < candidate_count; i++) {
+                const struct candidate *c;
+                if (selected == NULL || !selected[i])
+                        continue;
+                c = &candidate[i];
+                printf("  SELECT %lu %s ", i + 1UL,
+                    candidate_name(c->kind));
+                print_source_location(stdout,
+                    &in[r[c->a_region].input], r[c->a_region].off);
+                printf(" <=> ");
+                print_source_location(stdout,
+                    &in[r[c->b_region].input], r[c->b_region].off);
+                printf(" : EXPECTED-FOLD-SAVE %lu; EXACT-RUN %lu\n",
+                    c->fold_save, c->span);
+        }
         printf("SUMMARY: %lu REORDERING MATCHES; %lu MATCHED WORDS (NON-ADDITIVE)\n",
             matches, words);
         printf("  SCHEDULE-ONLY: %lu MATCHES; %lu WORDS\n",
@@ -2092,6 +2404,6 @@ main(int argc, char **argv)
             rename_matches, rename_words);
         printf("  PEEPHOLE-SHORTENING: %lu WORDS\n", peephole_words);
         for (ai = 0; ai < ni; ai++) dobj_free(&in[ai].obj);
-        free(r); free(in);
+        free(selected); free(candidate); free(r); free(in);
         return 0;
 }

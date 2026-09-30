@@ -35,6 +35,15 @@ JUMP/AOJ/SOJ conditions are complementary and whose successors are therefore
 exchanged. Neither advisory class is folded directly; changed source must still
 assemble and pass the exact relocation-aware `p10fold` checks.
 
+After pair discovery, `p10super` builds a global normalization plan.  Each
+candidate records the concrete final order, zero-form normalization, and any
+region-local AC renaming required on both source ranges.  An exact branch-and-
+bound selector rejects overlapping contradictory actions while allowing the
+same normalization of one range to serve several matches.  It maximizes
+pair-proven zero-cost fold saving first and relocation-aware exact-run potential
+second.  `GLOBAL-PLAN` and `SELECT` records are advisory; selected source
+changes must still be reassembled and measured by `p10fold`.
+
 `p10fold` searches exact relocation-aware duplicate text. Its zero-cost
 accounting distinguishes removable unnamed donor blocks from address-stable
 anchors and also considers aligned removable subruns inside longer duplicate
