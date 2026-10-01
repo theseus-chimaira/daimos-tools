@@ -308,6 +308,39 @@ unconditional_end(const struct input *in, unsigned long off)
 }
 
 static int
+may_skip_next(const struct input *in, unsigned long off)
+{
+        unsigned long op = opcode_at(in, off);
+        unsigned long condition;
+
+        if ((op >= 0300UL && op <= 0317UL) || /* CAI, CAM */
+            (op >= 0330UL && op <= 0337UL) || /* SKIP */
+            (op >= 0350UL && op <= 0357UL) || /* AOS */
+            (op >= 0370UL && op <= 0377UL) || /* SOS */
+            (op >= 0600UL && op <= 0677UL)) { /* TR/TL tests */
+                condition = op & 07UL;
+                return condition != 0UL;
+        }
+        return 0;
+}
+
+/*
+ * A final JRST/POPJ is not a true sequential terminator when the preceding
+ * instruction can skip over it.  Folding such a prefix onto another copy
+ * would redirect the skip path into the anchor's unrelated fall-through
+ * continuation.  PDP-10 skip instructions skip exactly one word, so only
+ * the immediate predecessor must be checked here.
+ */
+static int
+block_ends_path(const struct input *in, unsigned long off,
+    unsigned long words)
+{
+        if (words == 0UL || !unconditional_end(in, off + words - 1UL))
+                return 0;
+        return words == 1UL || !may_skip_next(in, off + words - 2UL);
+}
+
+static int
 isolated_block(const struct input *in, unsigned long off,
     unsigned long words)
 {
@@ -317,7 +350,7 @@ isolated_block(const struct input *in, unsigned long off,
                 return 0;
         if (off != 0UL && !unconditional_end(in, off - 1UL))
                 return 0;
-        if (!unconditional_end(in, off + words - 1UL))
+        if (!block_ends_path(in, off, words))
                 return 0;
         /*
          * A removed copy must have a single legal entry.  Reject labels and
@@ -364,7 +397,7 @@ jump_foldable_block(const struct input *in, unsigned long off,
         unsigned long i;
 
         if (words < 2UL || off + words > in->obj.text_words ||
-            !unconditional_end(in, off + words - 1UL))
+            !block_ends_path(in, off, words))
                 return 0;
         /*
          * Word zero remains present and becomes the JRST to the external
