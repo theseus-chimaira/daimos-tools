@@ -11,7 +11,7 @@
 #define TSFS_MAX_MEMBERS 7U
 
 #define TSFS_FORMAT_MAJOR 1U
-#define TSFS_FORMAT_MINOR 0U
+#define TSFS_FORMAT_MINOR 1U
 
 #define TSFS_DESC_PRIMARY_BLOCK 1U
 #define TSFS_DESC_BACKUP_BLOCK  2U
@@ -71,9 +71,17 @@
 #define TSFS_FILE_FLAG_DIR           1U
 #define TSFS_FILE_FLAG_REG           2U
 #define TSFS_FILE_FLAG_MASK          3U
+#define TSFS_FILE_MODE_SHIFT         6U
+#define TSFS_FILE_MODE_MASK          07777U
+#define TSFS_FILE_OWNER_SHIFT        9U
+#define TSFS_FILE_ID_MASK            0777U
+#define TSFS_FILE_FLAG_RESERVED_MASK 074U
 #define TSFS_FILE_NAME_CHARS         (TSFS_FILE_NAME_WORDS * 6U)
 
-/* Directory AUX is FIRST_CHILD,,CHILD_COUNT. */
+/* MODE occupies bits 6..17 of PARENT_FLAGS RH; bits 2..5 stay zero.
+ * Owner is compact UID9,,GID9.  Directories store owner in SIZE_WORDS, whose
+ * size is otherwise always zero; regular files store owner in AUX, otherwise
+ * unused for regular records.  Directory AUX remains FIRST_CHILD,,CHILD_COUNT. */
 #define TSFS_FILE_ROOT_INDEX         0U
 
 /*

@@ -29,6 +29,9 @@ struct manifest_node {
         unsigned int size_words;
         unsigned int first_extent;
         unsigned int extent_count;
+        unsigned int mode;
+        unsigned int uid;
+        unsigned int gid;
 };
 
 static void
@@ -51,6 +54,23 @@ parse_octal_word(const char *text, uint64_t *value)
             (v & ~TSFS_WORD_MASK) != 0)
                 return -1;
         *value = (uint64_t)v;
+        return 0;
+}
+
+static int
+parse_uint_limited(const char *text, int base, unsigned int limit,
+    unsigned int *value)
+{
+        char *end;
+        unsigned long v;
+
+        if (text == NULL || *text == '\0')
+                return -1;
+        errno = 0;
+        v = strtoul(text, &end, base);
+        if (errno != 0 || end == text || *end != '\0' || v > limit)
+                return -1;
+        *value = (unsigned int)v;
         return 0;
 }
 
@@ -296,14 +316,6 @@ read_manifest(const char *path, struct manifest_node **nodesp,
                         while (*end == ' ' || *end == '\t')
                                 ++end;
                 }
-                if (is_dir && *end != '\0') {
-                        fprintf(stderr,
-                            "mktsfs: manifest line %u: directory has a source path\n",
-                            lineno);
-                        free(nodes);
-                        fclose(fp);
-                        return -1;
-                }
                 if (!path_valid(p) || find_node(nodes, count, p) >= 0) {
                         fprintf(stderr, "mktsfs: manifest line %u: invalid or duplicate path\n",
                             lineno);
@@ -342,16 +354,69 @@ read_manifest(const char *path, struct manifest_node **nodesp,
                 memset(&nodes[count], 0, sizeof(nodes[count]));
                 strcpy(nodes[count].path, p);
                 strcpy(nodes[count].name, name);
-                if (!is_dir && *end != '\0') {
-                        if (strlen(end) >= sizeof(nodes[count].source)) {
+                nodes[count].mode = is_dir ? 0555U : 0444U;
+                nodes[count].uid = 0U;
+                nodes[count].gid = 0U;
+                {
+                        char *field[4];
+                        unsigned int nf;
+                        char *q;
+
+                        nf = 0U;
+                        q = end;
+                        while (*q != '\0') {
+                                while (*q == ' ' || *q == '\t')
+                                        ++q;
+                                if (*q == '\0')
+                                        break;
+                                if (nf == 4U)
+                                        break;
+                                field[nf++] = q;
+                                while (*q != '\0' && *q != ' ' && *q != '\t')
+                                        ++q;
+                                if (*q != '\0')
+                                        *q++ = '\0';
+                        }
+                        while (*q == ' ' || *q == '\t')
+                                ++q;
+                        if (*q != '\0' ||
+                            (is_dir && nf != 0U && nf != 3U) ||
+                            (!is_dir && nf != 1U && nf != 4U)) {
                                 fprintf(stderr,
-                                    "mktsfs: manifest line %u: source path too long\n",
+                                    "mktsfs: manifest line %u: expected D path [mode uid gid] or F path source [mode uid gid]\n",
                                     lineno);
                                 free(nodes);
                                 fclose(fp);
                                 return -1;
                         }
-                        strcpy(nodes[count].source, end);
+                        if (!is_dir) {
+                                if (strlen(field[0]) >= sizeof(nodes[count].source)) {
+                                        fprintf(stderr,
+                                            "mktsfs: manifest line %u: source path too long\n",
+                                            lineno);
+                                        free(nodes);
+                                        fclose(fp);
+                                        return -1;
+                                }
+                                strcpy(nodes[count].source, field[0]);
+                        }
+                        if ((is_dir && nf == 3U) || (!is_dir && nf == 4U)) {
+                                unsigned int ai;
+                                ai = is_dir ? 0U : 1U;
+                                if (parse_uint_limited(field[ai], 8,
+                                    TSFS_FILE_MODE_MASK, &nodes[count].mode) != 0 ||
+                                    parse_uint_limited(field[ai + 1U], 10,
+                                    TSFS_FILE_ID_MASK, &nodes[count].uid) != 0 ||
+                                    parse_uint_limited(field[ai + 2U], 10,
+                                    TSFS_FILE_ID_MASK, &nodes[count].gid) != 0) {
+                                        fprintf(stderr,
+                                            "mktsfs: manifest line %u: invalid mode/uid/gid\n",
+                                            lineno);
+                                        free(nodes);
+                                        fclose(fp);
+                                        return -1;
+                                }
+                        }
                 }
                 nodes[count].is_dir = is_dir;
                 nodes[count].parent_node = parent_node;
@@ -459,13 +524,16 @@ build_file_record(uint64_t rec[TSFS_FILE_WORDS],
 
         memset(rec, 0, TSFS_FILE_WORDS * sizeof(rec[0]));
         flags = node->is_dir ? TSFS_FILE_FLAG_DIR : TSFS_FILE_FLAG_REG;
+        flags |= (uint64_t)(node->mode & TSFS_FILE_MODE_MASK) <<
+            TSFS_FILE_MODE_SHIFT;
         rec[TSFS_FILE_PARENT_FLAGS] = ((uint64_t)parent_record << 18) | flags;
         nchars = (unsigned int)strlen(node->name);
         for (i = 0U; i < TSFS_FILE_NAME_WORDS; ++i)
                 rec[TSFS_FILE_NAME0 + i] = pack_sixbit6(node->name,
                     i * 6U, nchars);
         if (node->is_dir) {
-                rec[TSFS_FILE_SIZE_WORDS] = 0;
+                rec[TSFS_FILE_SIZE_WORDS] =
+                    ((uint64_t)node->uid << TSFS_FILE_OWNER_SHIFT) | node->gid;
                 rec[TSFS_FILE_EXTENT_RANGE] = 0;
                 rec[TSFS_FILE_AUX] = node->child_count == 0U ? 0U :
                     ((uint64_t)node->child_start << 18) | node->child_count;
@@ -473,7 +541,8 @@ build_file_record(uint64_t rec[TSFS_FILE_WORDS],
                 rec[TSFS_FILE_SIZE_WORDS] = node->size_words;
                 rec[TSFS_FILE_EXTENT_RANGE] = node->extent_count == 0U ? 0U :
                     ((uint64_t)node->first_extent << 18) | node->extent_count;
-                rec[TSFS_FILE_AUX] = 0;
+                rec[TSFS_FILE_AUX] =
+                    ((uint64_t)node->uid << TSFS_FILE_OWNER_SHIFT) | node->gid;
         }
 }
 
@@ -482,7 +551,9 @@ build_root_record(uint64_t rec[TSFS_FILE_WORDS],
     unsigned int child_count)
 {
         memset(rec, 0, TSFS_FILE_WORDS * sizeof(rec[0]));
-        rec[TSFS_FILE_PARENT_FLAGS] = TSFS_FILE_FLAG_DIR;
+        rec[TSFS_FILE_PARENT_FLAGS] =
+            ((uint64_t)0555U << TSFS_FILE_MODE_SHIFT) | TSFS_FILE_FLAG_DIR;
+        rec[TSFS_FILE_SIZE_WORDS] = 0U;   /* root owner 0:0 */
         rec[TSFS_FILE_AUX] = ((uint64_t)(child_count == 0U ? 0U : 1U) << 18) |
             child_count;
 }

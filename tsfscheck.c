@@ -162,10 +162,12 @@ validate_file_table(const struct table_info *t, const uint64_t *words,
                     TSFS_HALF_MASK);
                 flags = (unsigned int)(r[TSFS_FILE_PARENT_FLAGS] &
                     TSFS_HALF_MASK);
-                if ((flags & ~TSFS_FILE_FLAG_MASK) != 0U ||
-                    (flags != TSFS_FILE_FLAG_DIR && flags != TSFS_FILE_FLAG_REG) ||
+                if ((flags & TSFS_FILE_FLAG_RESERVED_MASK) != 0U ||
+                    (((flags & TSFS_FILE_FLAG_MASK) != TSFS_FILE_FLAG_DIR) &&
+                    ((flags & TSFS_FILE_FLAG_MASK) != TSFS_FILE_FLAG_REG)) ||
                     !name_record_valid(r, i == TSFS_FILE_ROOT_INDEX))
                         return -1;
+                flags &= TSFS_FILE_FLAG_MASK;
                 if (i == TSFS_FILE_ROOT_INDEX) {
                         if (parent != 0U || flags != TSFS_FILE_FLAG_DIR)
                                 return -1;
@@ -173,7 +175,7 @@ validate_file_table(const struct table_info *t, const uint64_t *words,
                         return -1;
                 }
                 if (flags == TSFS_FILE_FLAG_DIR) {
-                        if (r[TSFS_FILE_SIZE_WORDS] != 0U ||
+                        if (r[TSFS_FILE_SIZE_WORDS] > TSFS_HALF_MASK ||
                             r[TSFS_FILE_EXTENT_RANGE] != 0U)
                                 return -1;
                         first = (unsigned int)((r[TSFS_FILE_AUX] >> 18) &
@@ -184,7 +186,7 @@ validate_file_table(const struct table_info *t, const uint64_t *words,
                             first + count > t->record_count)))
                                 return -1;
                 } else {
-                        if (r[TSFS_FILE_AUX] != 0U ||
+                        if (r[TSFS_FILE_AUX] > TSFS_HALF_MASK ||
                             r[TSFS_FILE_SIZE_WORDS] > TSFS_HALF_MASK)
                                 return -1;
                         size = (unsigned int)r[TSFS_FILE_SIZE_WORDS];
