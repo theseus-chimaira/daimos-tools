@@ -220,6 +220,27 @@ static void compress_raw(const char *inpath, const char *outpath, int text_mode)
     free(in);
 }
 
+static void compress_framed(const char *inpath, const char *outpath)
+{
+    uint64_t *in, *payload, *out;
+    size_t n, payload_n, i;
+
+    in = read_words(inpath, &n);
+    if (n > (size_t)WORD_MASK)
+        die("framed input is too large");
+    payload = compress_words(in, n, &payload_n);
+    out = (uint64_t *)malloc((payload_n + 1U) * sizeof(*out));
+    if (out == NULL)
+        die("out of memory");
+    out[0] = (uint64_t)n;
+    for (i = 0U; i < payload_n; ++i)
+        out[i + 1U] = payload[i];
+    write_words(outpath, out, payload_n + 1U);
+    free(out);
+    free(payload);
+    free(in);
+}
+
 static void compress_exec(const char *inpath, const char *outpath)
 {
     uint64_t *in, *payload, *out;
@@ -266,7 +287,7 @@ static void compress_exec(const char *inpath, const char *outpath)
 
 static void usage(void)
 {
-    fprintf(stderr, "usage: d6lz [-t] [-x|-X] input output\n");
+    fprintf(stderr, "usage: d6lz [-t|-f] [-x|-X] input output\n");
     exit(1);
 }
 
@@ -274,20 +295,26 @@ int main(int argc, char **argv)
 {
     int exec_mode = 0;
     int text_mode = 0;
+    int framed_mode = 0;
     int arg = 1;
     while (arg < argc && argv[arg][0] == '-') {
         if (strcmp(argv[arg], "-x") == 0 || strcmp(argv[arg], "-X") == 0)
             exec_mode = 1;
         else if (strcmp(argv[arg], "-t") == 0)
             text_mode = 1;
+        else if (strcmp(argv[arg], "-f") == 0)
+            framed_mode = 1;
         else
             usage();
         ++arg;
     }
-    if (argc - arg != 2 || (exec_mode && text_mode))
+    if (argc - arg != 2 || (exec_mode && (text_mode || framed_mode)) ||
+        (text_mode && framed_mode))
         usage();
     if (exec_mode)
         compress_exec(argv[arg], argv[arg + 1]);
+    else if (framed_mode)
+        compress_framed(argv[arg], argv[arg + 1]);
     else
         compress_raw(argv[arg], argv[arg + 1], text_mode);
     return 0;
