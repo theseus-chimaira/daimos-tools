@@ -86,7 +86,7 @@ static unsigned long long wcnsls_glyph(unsigned int ch)
 
 static void emit_word(FILE *f, unsigned long long word)
 {
-    fprintf(f, "        .word %012llo\n", word & 0777777777777ULL);
+    fprintf(f, "        .word 0%012llo\n", word & 0777777777777ULL);
 }
 
 static void emit_dpy(FILE *f, const char *version_text)
