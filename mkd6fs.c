@@ -831,9 +831,16 @@ static void format_fs(unsigned super_a, unsigned super_b)
         uint64_t fsid0, fsid1;
 
         total = total_blocks();
-        fcb_count = 64U;
-        if (node_count > fcb_count)
-                die("filesystem needs more than 64 FCBs");
+        /*
+         * Keep the historical 64-FCB minimum for small filesystems, but do
+         * not turn it into an artificial object-count limit.  FCBs occupy
+         * whole filesystem blocks (8 FCBs per 0200-word block), so round the
+         * table only to that natural allocation unit.
+         */
+        fcb_count = (node_count + (BLOCK_WORDS / FCB_WORDS) - 1U) /
+            (BLOCK_WORDS / FCB_WORDS) * (BLOCK_WORDS / FCB_WORDS);
+        if (fcb_count < 64U)
+                fcb_count = 64U;
         fcb_blocks = (fcb_count * FCB_WORDS + BLOCK_WORDS - 1U) / BLOCK_WORDS;
         freemap_blocks = (total + BITS_PER_MAP_BLOCK - 1U) / BITS_PER_MAP_BLOCK;
         summary_blocks = (freemap_blocks + BITS_PER_MAP_BLOCK - 1U) /
