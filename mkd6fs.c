@@ -13,7 +13,6 @@
 #define BLOCK_WORDS             0200U
 #define SCAN_LIMIT              0200U
 #define MAX_MEMBERS             8U
-#define MAX_NODES               128U
 #define MAX_NAME_CHARS          24U
 #define MAX_PATH_CHARS          255U
 #define FCB_WORDS               020U
@@ -86,8 +85,32 @@ struct node {
 
 static struct member members[MAX_MEMBERS];
 static unsigned member_count;
-static struct node nodes[MAX_NODES];
+static struct node *nodes;
 static unsigned node_count;
+static unsigned node_capacity;
+
+static void die(const char *msg);
+
+static void ensure_node_capacity(unsigned need)
+{
+        struct node *new_nodes;
+        unsigned capacity;
+
+        if (need <= node_capacity)
+                return;
+        if (need > HALF_MASK + 1U)
+                die("filesystem node count exceeds D6FS FCB index range");
+        capacity = node_capacity == 0U ? 64U : node_capacity;
+        while (capacity < need)
+                capacity *= 2U;
+        new_nodes = realloc(nodes, (size_t)capacity * sizeof(*nodes));
+        if (new_nodes == NULL)
+                die("out of memory allocating filesystem nodes");
+        memset(new_nodes + node_capacity, 0,
+            (size_t)(capacity - node_capacity) * sizeof(*nodes));
+        nodes = new_nodes;
+        node_capacity = capacity;
+}
 
 static void die(const char *msg)
 {
@@ -264,8 +287,7 @@ static unsigned add_node(unsigned parent, const char *name, unsigned type,
 {
         struct node *n;
 
-        if (node_count >= MAX_NODES)
-                die("too many filesystem nodes");
+        ensure_node_capacity(node_count + 1U);
         if (strlen(name) > MAX_NAME_CHARS)
                 die("name exceeds 24 SIXBIT characters");
         n = &nodes[node_count];
@@ -982,9 +1004,9 @@ static void usage(void)
 int main(int argc, char **argv)
 {
         const char *dir;
-        const char *dirs[MAX_NODES];
-        const char *specs[MAX_NODES];
-        const char *links[MAX_NODES];
+        const char **dirs;
+        const char **specs;
+        const char **links;
         unsigned ndir, nspec, nlink, n, super_a, super_b, i;
         int a;
 
@@ -993,7 +1015,14 @@ int main(int argc, char **argv)
         nspec = 0U;
         nlink = 0U;
         n = 0U;
-        memset(nodes, 0, sizeof(nodes));
+        dirs = calloc((size_t)argc, sizeof(*dirs));
+        specs = calloc((size_t)argc, sizeof(*specs));
+        links = calloc((size_t)argc, sizeof(*links));
+        if (dirs == NULL || specs == NULL || links == NULL)
+                die("out of memory allocating filesystem specifications");
+        nodes = NULL;
+        node_capacity = 0U;
+        ensure_node_capacity(1U);
         node_count = 1U;
         nodes[0].type = D6FS_TYPE_DIR;
         nodes[0].mode = 0755U;
@@ -1004,16 +1033,10 @@ int main(int argc, char **argv)
                 else if (strcmp(argv[a], "-d") == 0 && a + 1 < argc)
                         dir = argv[++a];
                 else if (strcmp(argv[a], "-D") == 0 && a + 1 < argc) {
-                        if (ndir >= MAX_NODES)
-                                die("too many directory specs");
                         dirs[ndir++] = argv[++a];
                 } else if (strcmp(argv[a], "-f") == 0 && a + 1 < argc) {
-                        if (nspec >= MAX_NODES)
-                                die("too many file specs");
                         specs[nspec++] = argv[++a];
                 } else if (strcmp(argv[a], "-l") == 0 && a + 1 < argc) {
-                        if (nlink >= MAX_NODES)
-                                die("too many symlink specs");
                         links[nlink++] = argv[++a];
                 } else
                         usage();
@@ -1034,6 +1057,10 @@ int main(int argc, char **argv)
                         die_path(members[i].path);
         for (i = 0U; i < node_count; ++i)
                 free(nodes[i].data);
+        free(nodes);
+        free(dirs);
+        free(specs);
+        free(links);
         if (d6m_run_fsck(argv[0], dir, n, 0) != 0)
                 die("post-format d6fsck failed");
         return 0;
