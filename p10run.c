@@ -594,9 +594,11 @@ static void find_libgcc(char *out, const char *gcc, const char *work)
 
 static void link_objects(const char *dlink, const char *work, const char *name,
                          char **objects, int nobj, const char *libc,
-                         const char *libgcc, char *dxr, char *map)
+                         const char *libgcc, unsigned long base,
+                         char *dxr, char *map)
 {
     char **av;
+    char bopt[32];
     int ac;
     int i;
     {
@@ -608,11 +610,15 @@ static void link_objects(const char *dlink, const char *work, const char *name,
         cat_text(leaf, sizeof(leaf), ".map");
         make_path2(map, PATHSZ, work, leaf);
     }
-    av = (char **)malloc((size_t)(nobj + 9) * sizeof(av[0]));
+    if (snprintf(bopt, sizeof(bopt), "%lo", base) >= (int)sizeof(bopt))
+        die("link base address too long");
+    av = (char **)malloc((size_t)(nobj + 11) * sizeof(av[0]));
     if (av == NULL)
         die("out of memory");
     ac = 0;
     av[ac++] = (char *)dlink;
+    av[ac++] = (char *)"-b";
+    av[ac++] = bopt;
     av[ac++] = (char *)"-o";
     av[ac++] = dxr;
     av[ac++] = (char *)"-M";
@@ -1024,11 +1030,19 @@ int main(int argc, char **argv)
     join_path(libc, prefix, "lib/libc.a");
     if (!path_exists(libc)) libc[0] = 0;
     find_libgcc(libgcc, gcc, work);
-    link_objects(dlink, work, name, objects, o.sources.n, libc, libgcc, dxr, map);
-    read_map(map, start, &labels);
+    /*
+     * Link at the actual load address.  A zero-based DXR relocation bitmap
+     * records right-half relocations only, so post-link relocation cannot
+     * correctly adjust packed LH18 references such as symbol,,symbol.
+     * Fix both halves at link time and use DXR conversion only to place the
+     * already-linked image at START.
+     */
+    link_objects(dlink, work, name, objects, o.sources.n, libc, libgcc,
+                 start, dxr, map);
+    read_map(map, 0UL, &labels);
     entry = dxr_entry(dxr, start);
     { char leaf[MAX_NAME + 20]; copy_text(leaf, sizeof(leaf), name); cat_text(leaf, sizeof(leaf), ".labels"); make_path2(labels_path, sizeof(labels_path), work, leaf); }
-    copy_labels(map, labels_path, start);
+    copy_labels(map, labels_path, 0UL);
     if (strcmp(o.mode, "rim") == 0) {
         { char leaf[MAX_NAME + 8]; copy_text(leaf, sizeof(leaf), name); cat_text(leaf, sizeof(leaf), ".rim"); make_path2(image, sizeof(image), work, leaf); }
         convert_dxr(conv, dxr, image, "rim", start);
