@@ -1,4 +1,5 @@
 *.o
+build-native-v1/
 mkdsk
 mkd6fs
 d6fsck
