@@ -348,8 +348,18 @@ isolated_block(const struct input *in, unsigned long off,
 
         if (words == 0UL)
                 return 0;
-        if (off != 0UL && !unconditional_end(in, off - 1UL))
-                return 0;
+        if (off != 0UL) {
+                if (!unconditional_end(in, off - 1UL))
+                        return 0;
+                /* A PDP-10 skip at OFF-2 can skip the apparent JRST/POPJ
+                 * terminator at OFF-1 and enter OFF directly.  That edge is
+                 * implicit in the instruction stream and has no relocation
+                 * for DLINK to retarget when this block is removed.  Treat
+                 * it exactly like the symmetric skip-over-terminator case
+                 * checked by block_ends_path(). */
+                if (off >= 2UL && may_skip_next(in, off - 2UL))
+                        return 0;
+        }
         if (!block_ends_path(in, off, words))
                 return 0;
         /*
