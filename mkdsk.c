@@ -17,7 +17,8 @@
 #define WORD_MASK 0777777777777ULL
 #define HALF_MASK 0777777U
 #define SECTOR_WORDS 0200U
-#define SECTORS 02000U
+#define DEFAULT_SECTORS 02000U
+#define DSK270_SECTORS   0130000U
 #define SCAN_LIMIT 0200U
 #define MAX_MEMBERS 4U
 #define DB0_BAD_RUNS 040U
@@ -179,7 +180,7 @@ static void add_bad(struct member *m, unsigned start, unsigned count)
         while (count != 0) {
                 unsigned chunk = count > BAD_RUN_MAX_LENGTH ?
                     BAD_RUN_MAX_LENGTH : count;
-                if (start >= SECTORS || chunk > SECTORS - start) {
+                if (start >= m->sectors || chunk > m->sectors - start) {
                         fprintf(stderr, "mkdsk: bad run outside disk\n");
                         exit(1);
                 }
@@ -423,7 +424,7 @@ int main(int argc, char **argv)
 
         memset(members, 0, sizeof(members));
         for (u = 0; u < n; ++u)
-                members[u].sectors = SECTORS;
+                members[u].sectors = DEFAULT_SECTORS;
         if (member_sectors_arg != NULL) {
                 const char *q = member_sectors_arg;
 
@@ -434,7 +435,7 @@ int main(int argc, char **argv)
                         if (*q == '\0')
                                 usage();
                         v = strtoul(q, &end, 0);
-                        if (end == q || v == 0UL || v > SECTORS ||
+                        if (end == q || v == 0UL || v > DSK270_SECTORS ||
                             (u + 1U < n && *end != ',') ||
                             (u + 1U == n && *end != '\0'))
                                 usage();
