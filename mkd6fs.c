@@ -16,6 +16,7 @@
 #define MAX_NAME_CHARS          24U
 #define MAX_PATH_CHARS          255U
 #define FCB_WORDS               020U
+#define FCB_FREE_RESERVE        64U
 #define SUPER_WORDS             020U
 #define DIRENT_WORDS            6U
 #define BITS_PER_MAP_BLOCK      (BLOCK_WORDS * 36U)
@@ -854,12 +855,18 @@ static void format_fs(unsigned super_a, unsigned super_b)
 
         total = total_blocks();
         /*
-         * Keep the historical 64-FCB minimum for small filesystems, but do
-         * not turn it into an artificial object-count limit.  FCBs occupy
-         * whole filesystem blocks (8 FCBs per 0200-word block), so round the
-         * table only to that natural allocation unit.
+         * A writable image must retain object slots after image creation.
+         * DAS alone needs several simultaneous scratch/output files, and a
+         * self-host build needs substantially more.  Reserving one historical
+         * 64-FCB slab costs only eight 0200-word filesystem blocks and avoids
+         * making runtime create capacity depend on node_count modulo eight.
          */
-        fcb_count = (node_count + (BLOCK_WORDS / FCB_WORDS) - 1U) /
+        need = node_count;
+        if (need <= HALF_MASK + 1U - FCB_FREE_RESERVE)
+                need += FCB_FREE_RESERVE;
+        else
+                need = HALF_MASK + 1U;
+        fcb_count = (need + (BLOCK_WORDS / FCB_WORDS) - 1U) /
             (BLOCK_WORDS / FCB_WORDS) * (BLOCK_WORDS / FCB_WORDS);
         if (fcb_count < 64U)
                 fcb_count = 64U;
