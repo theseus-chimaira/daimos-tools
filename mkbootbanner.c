@@ -14,6 +14,7 @@
 #define DPY_MODE_POINT 1U
 #define DPY_MODE_CHAR 3U
 #define DPY_SPACE 040U
+#define DPY_ESC 037U
 
 static const unsigned long long wcnsls_title[] = {
     0364306143076ULL, 0164307743061ULL, 0371020410237ULL,
@@ -129,12 +130,16 @@ static void emit_dpy(FILE *f, const char *version_text)
             }
         }
     }
-    if (count != 0U) {
-        while (count < 6U)
-            codes[count++] = DPY_SPACE;
-        emit_word(f, dpy_inst(dpy_char3(codes[0], codes[1], codes[2]),
-            dpy_char3(codes[3], codes[4], codes[5])));
-    }
+    /* Type 342 remains in CHAR mode until it sees ESC.  A boot banner used
+     * only once did not need to care, but the resident DPY driver replays the
+     * same five-word program.  Terminate every generated stream in PARAM mode
+     * so the first word of the next refresh is decoded as a PARAM instruction
+     * rather than as three character codes. */
+    while (count < 5U)
+        codes[count++] = DPY_SPACE;
+    codes[count++] = DPY_ESC;
+    emit_word(f, dpy_inst(dpy_char3(codes[0], codes[1], codes[2]),
+        dpy_char3(codes[3], codes[4], codes[5])));
     fprintf(f, "minit_dpy_banner_words_end:\n");
 }
 

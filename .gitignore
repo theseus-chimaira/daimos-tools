@@ -23,3 +23,7 @@ mktsfs
 p10fold
 p10super
 tsfscheck
+dta2dtr
+sixmd-check
+img2dpic
+__pycache__/
