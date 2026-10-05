@@ -7,6 +7,7 @@ TARGET_SIZE = 1024
 NEAR_SQUARE_DIVISOR = 64
 VECTOR_MAX_DELTA = 127
 INTENSITY_MAX = 7
+TYPE340_MAX_WORDS = 32256
 
 MODE_PARAM = 0
 MODE_POINT = 1
@@ -235,22 +236,52 @@ def iter_runs(pbm_payload, width, height):
             yield start, y, x - start
 
 
-def emit_run(writer, x, y, length, stats):
-    stats["runs"] += 1
-    stats["lit_pixels"] += length
-    writer.put_half(ty340_param(MODE_POINT, True, INTENSITY_MAX))
-    writer.put_half(ty340_point(MODE_POINT, x, False, False))
-    if length == 1:
-        writer.put_half(ty340_point(MODE_PARAM, y, True, True))
-        return
-    writer.put_half(ty340_point(MODE_VECTOR, y, True, True))
+def ordered_runs(runs):
+    rows = {}
+    for x, y, length in runs:
+        rows.setdefault(y, []).append((x, length))
+    ordered = []
+    for y in sorted(rows):
+        row = rows[y]
+        if y & 1:
+            for x, length in reversed(row):
+                ordered.append((x + length - 1, y, length, -1))
+        else:
+            for x, length in row:
+                ordered.append((x, y, length, 1))
+    return ordered
+
+
+def emit_vector_move(writer, dx, dy, stats):
+    while dx != 0 or dy != 0:
+        sx = min(abs(dx), VECTOR_MAX_DELTA)
+        sy = min(abs(dy), VECTOR_MAX_DELTA)
+        writer.put_half(ty340_vector(False, False, dy < 0, sy,
+                                     dx < 0, sx))
+        stats["move_segments"] += 1
+        if dx < 0:
+            dx += sx
+        else:
+            dx -= sx
+        if dy < 0:
+            dy += sy
+        else:
+            dy -= sy
+
+
+def emit_vector_run(writer, length, direction, final, stats):
     remaining = length - 1
-    while remaining:
+    if remaining == 0:
+        writer.put_half(ty340_vector(final, True, False, 0,
+                                     direction < 0, 0))
+        stats["draw_segments"] += 1
+        return
+    while remaining != 0:
         delta = min(remaining, VECTOR_MAX_DELTA)
         remaining -= delta
-        writer.put_half(ty340_vector(remaining == 0, True, False, 0, False,
-                                     delta))
-        stats["vector_segments"] += 1
+        writer.put_half(ty340_vector(final and remaining == 0, True, False, 0,
+                                     direction < 0, delta))
+        stats["draw_segments"] += 1
 
 
 def convert_type340(inpath, outpath):
@@ -258,15 +289,38 @@ def convert_type340(inpath, outpath):
     data = convert_to_pbm(inpath)
     width, height, payload = parse_pbm(data)
     writer = WordWriter(outpath)
-    stats = {"lit_pixels": 0, "runs": 0, "vector_segments": 0}
-    for x, y, length in iter_runs(payload, width, height):
-        emit_run(writer, x, y, length, stats)
+    runs = list(iter_runs(payload, width, height))
+    ordered = ordered_runs(runs)
+    stats = {"lit_pixels": 0, "runs": len(ordered),
+             "move_segments": 0, "draw_segments": 0}
+    if ordered:
+        writer.put_half(ty340_param(MODE_VECTOR, True, INTENSITY_MAX))
+        cur_x = 0
+        cur_y = 0
+        for i, (start_x, y, length, direction) in enumerate(ordered):
+            emit_vector_move(writer, start_x - cur_x, y - cur_y, stats)
+            emit_vector_run(writer, length, direction,
+                            i + 1 == len(ordered), stats)
+            stats["lit_pixels"] += length
+            cur_x = start_x + direction * (length - 1)
+            cur_y = y
+    else:
+        writer.put_half(ty340_param(MODE_PARAM, True, INTENSITY_MAX))
     writer.finish()
+    if writer.words > TYPE340_MAX_WORDS:
+        try:
+            import os
+            os.unlink(outpath)
+        except OSError:
+            pass
+        die(f"converted Type 340 program needs {writer.words} words; "
+            f"maximum supported by DPYVIEW is {TYPE340_MAX_WORDS}")
     sys.stderr.write(
         f"img2dpic: TYPE340 {inpath} -> {outpath}\n"
         f"img2dpic: converted to 1-bit and scaled image {TARGET_SIZE}x{TARGET_SIZE}, "
         f"lit pixels={stats['lit_pixels']}, runs={stats['runs']}, "
-        f"vector segments={stats['vector_segments']}, "
+        f"move segments={stats['move_segments']}, "
+        f"draw segments={stats['draw_segments']}, "
         f"halfwords={writer.halfwords}, words={writer.words}\n"
     )
 
