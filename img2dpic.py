@@ -18,9 +18,10 @@ def usage(fp):
         "usage: img2dpic [-t 340] INPUT OUTPUT\n"
         "       img2dpic -h\n"
         "\n"
-        "Reads a strictly monochrome image through ImageMagick and emits a\n"
-        "Type 340 display program as little-endian 64-bit containers whose\n"
-        "low 36 bits hold one PDP-10 word.\n"
+        "Reads an opaque image through ImageMagick, scales it to 1024x1024,\n"
+        "converts it to 1-bit, and emits a Type 340 display program as\n"
+        "little-endian 64-bit containers whose low 36 bits hold one PDP-10\n"
+        "word.\n"
     )
 
 
@@ -100,18 +101,16 @@ def near_square(width, height):
 
 
 def identify_image(path):
-    fmt = "%n|%w|%h|%[type]|%z|%[opaque]"
+    fmt = "%n|%w|%h|%[opaque]"
     proc = run_checked(["magick", "identify", "-ping", "-format", fmt, path])
     text = proc.stdout.decode("utf-8", errors="strict")
     parts = text.split("|")
-    if len(parts) != 6:
+    if len(parts) != 4:
         die(f"{path}: unexpected identify output")
     frames = int(parts[0])
     width = int(parts[1])
     height = int(parts[2])
-    image_type = parts[3].strip().lower()
-    depth = int(parts[4])
-    opaque = parts[5].strip().lower()
+    opaque = parts[3].strip().lower()
     if frames != 1:
         die(f"{path}: only single-image inputs are supported")
     if width <= TARGET_SIZE or height <= TARGET_SIZE:
@@ -120,16 +119,16 @@ def identify_image(path):
         die(f"{path}: image must be square or near-square (got {width}x{height}; max delta 1/{NEAR_SQUARE_DIVISOR} of the larger side)")
     if opaque != "true":
         die(f"{path}: transparency is not allowed for Type 340 input")
-    if image_type != "bilevel" or depth != 1:
-        die(f"{path}: image is not strictly 1-bit (type={image_type}, depth={depth})")
     return width, height
 
 
 def convert_to_pbm(path):
     proc = run_checked([
         "magick", path,
-        "-sample", f"{TARGET_SIZE}x{TARGET_SIZE}!",
-        "-monochrome",
+        "-resize", f"{TARGET_SIZE}x{TARGET_SIZE}!",
+        "-colorspace", "Gray",
+        "-threshold", "50%",
+        "-type", "bilevel",
         "pbm:-",
     ])
     return proc.stdout
@@ -265,7 +264,7 @@ def convert_type340(inpath, outpath):
     writer.finish()
     sys.stderr.write(
         f"img2dpic: TYPE340 {inpath} -> {outpath}\n"
-        f"img2dpic: scaled image {TARGET_SIZE}x{TARGET_SIZE}, "
+        f"img2dpic: converted to 1-bit and scaled image {TARGET_SIZE}x{TARGET_SIZE}, "
         f"lit pixels={stats['lit_pixels']}, runs={stats['runs']}, "
         f"vector segments={stats['vector_segments']}, "
         f"halfwords={writer.halfwords}, words={writer.words}\n"
