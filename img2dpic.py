@@ -216,13 +216,19 @@ def iter_runs(pbm_payload, width, height):
     expect = stride * height
     if len(pbm_payload) != expect:
         die(f"PBM payload size mismatch: expected {expect} bytes, got {len(pbm_payload)}")
-    for y in range(height):
-        row = pbm_payload[y * stride:(y + 1) * stride]
+    for source_y in range(height):
+        row = pbm_payload[source_y * stride:(source_y + 1) * stride]
+        # PBM stores 1 for black and 0 for white.  A storage-tube/vector
+        # display has the opposite physical polarity: an intensified point is
+        # bright, while an untouched point is dark.  Therefore only PBM white
+        # pixels are emitted as lit vectors.  Raster row zero is the top row,
+        # whereas Type 340 Y=0 is the bottom edge, so reflect Y here as well.
+        y = height - 1 - source_y
         x = 0
         while x < width:
             byte = row[x >> 3]
             mask = 0x80 >> (x & 7)
-            if (byte & mask) == 0:
+            if (byte & mask) != 0:
                 x += 1
                 continue
             start = x
@@ -230,7 +236,7 @@ def iter_runs(pbm_payload, width, height):
             while x < width:
                 byte = row[x >> 3]
                 mask = 0x80 >> (x & 7)
-                if (byte & mask) == 0:
+                if (byte & mask) != 0:
                     break
                 x += 1
             yield start, y, x - start
