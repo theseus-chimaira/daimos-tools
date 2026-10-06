@@ -6,8 +6,8 @@
 #define NL_DEF_NAME_CHARS   6144U
 #define NL_MAX_LOCAL_SYMS     96U
 #define NL_LOCAL_NAME_CHARS 2048U
-#define NL_MAX_IMAGE_WORDS  040000UL
-#define NL_MAX_RELMAP_WORDS   512U
+#define NL_MAX_IMAGE_WORDS 0300000UL
+#define NL_MAX_RELMAP_WORDS ((NL_MAX_IMAGE_WORDS + 35UL) / 36UL)
 
 #define NL_HALF_MASK        0777777UL
 #define NL_DXR_BSS_MASK     0077777UL
@@ -428,7 +428,8 @@ layout(void)
                 nl_objects[i].bss_base = t + d + b;
                 b += nl_objects[i].obj.bss_words;
         }
-        if (t + d > NL_MAX_IMAGE_WORDS || t + d + b > 040000UL)
+        if (t + d > NL_MAX_IMAGE_WORDS || b > NL_DXR_BSS_MASK ||
+            nl_image_base + t + d + b > NL_HALF_MASK + 1UL)
                 return -1;
         nl_text_words = t;
         nl_data_words = d;
