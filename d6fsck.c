@@ -582,7 +582,7 @@ static void set_bit(uint64_t *map, unsigned bit, int value)
                 map[bit / 36U] &= ~mask;
 }
 
-static void mark_range(unsigned char *used, unsigned total, unsigned start,
+static void mark_range(uint32_t *used, unsigned total, unsigned start,
     unsigned count, unsigned owner)
 {
         unsigned b;
@@ -596,7 +596,7 @@ static void mark_range(unsigned char *used, unsigned total, unsigned start,
                 if (used[p] != 0 && used[p] != owner)
                         problem("cross-linked block", p, ~0U);
                 else
-                        used[p] = (unsigned char)owner;
+                        used[p] = owner;
         }
 }
 
@@ -845,7 +845,13 @@ static int check_filesystem(unsigned sa, unsigned sb)
         struct dir_patch *dir_patches;
         uint64_t *fcbs, *freemap, *summary;
         struct fcb_info *infos;
-        unsigned char *used, *reachable, *crosslinked;
+        /* Block owner: 0=unreferenced, 1=reserved, FCB index+2 otherwise.
+         * A byte is insufficient: FCB 254 maps to owner 256 and would wrap
+         * to zero, falsely freeing live file blocks during repair.
+         * D6FS permits more than 65533 FCBs, hence the 32-bit owner type.
+         */
+        uint32_t *used;
+        unsigned char *reachable, *crosslinked;
         unsigned char **bad_phys;
         unsigned *refs, *ref_parent, *queue;
         unsigned qh, qt;
@@ -904,7 +910,7 @@ static int check_filesystem(unsigned sa, unsigned sb)
         infos = calloc(s->fcb_count, sizeof(*infos));
         freemap = calloc((size_t)s->freemap_blocks * BLOCK_WORDS, sizeof(*freemap));
         summary = calloc((size_t)s->summary_blocks * BLOCK_WORDS, sizeof(*summary));
-        used = calloc(total, 1);
+        used = calloc((size_t)total, sizeof(*used));
         crosslinked = calloc(total, 1);
         reachable = calloc(s->fcb_count, 1);
         refs = calloc(s->fcb_count, sizeof(*refs));
@@ -972,7 +978,7 @@ static int check_filesystem(unsigned sa, unsigned sb)
                                         crosslinked[p] = 1;
                                         ambiguous = 1;
                                 } else
-                                        used[p] = (unsigned char)(i + 2U);
+                                        used[p] = i + 2U;
                         }
                 }
         }
