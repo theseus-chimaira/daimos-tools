@@ -3,6 +3,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+/* MSVC names its reentrant tokenizer strtok_s. */
+#if defined(_MSC_VER)
+#define strtok_r strtok_s
+#endif
 #include <limits.h>
 
 #define HALF_MASK 0777777UL
@@ -307,7 +312,7 @@ static int load_fold_plan(struct linker *l, const char *name)
         return -1;
     }
     while (fgets(line, sizeof(line), f) != NULL) {
-        char *kind, *dn, *doff, *an, *aoff, *words, *save;
+        char *kind, *dn, *doff, *an, *aoff, *words, *save, *context = NULL;
         unsigned long dv, av, wv;
         char *end;
         int di, ai;
@@ -324,13 +329,13 @@ static int load_fold_plan(struct linker *l, const char *name)
         }
         if (line[0] == '\0')
             continue;
-        kind = strtok(line, "\t");
-        dn = strtok(NULL, "\t");
-        doff = strtok(NULL, "\t");
-        an = strtok(NULL, "\t");
-        aoff = strtok(NULL, "\t");
-        words = strtok(NULL, "\t");
-        save = strtok(NULL, "\t");
+        kind = strtok_r(line, "\t", &context);
+        dn = strtok_r(NULL, "\t", &context);
+        doff = strtok_r(NULL, "\t", &context);
+        an = strtok_r(NULL, "\t", &context);
+        aoff = strtok_r(NULL, "\t", &context);
+        words = strtok_r(NULL, "\t", &context);
+        save = strtok_r(NULL, "\t", &context);
         if (kind == NULL || strcmp(kind, "FOLD") != 0 || dn == NULL ||
             doff == NULL || an == NULL || aoff == NULL || words == NULL ||
             save != NULL) {

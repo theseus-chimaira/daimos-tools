@@ -2,6 +2,11 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* MSVC names its reentrant tokenizer strtok_s. */
+#if defined(_MSC_VER)
+#define strtok_r strtok_s
+#endif
+
 #include "dobj.h"
 
 #define DEFAULT_MIN_WORDS 4UL
@@ -488,7 +493,7 @@ load_removed_plan(struct removed_list *l, const char *name)
         }
         while (fgets(line, sizeof(line), f) != NULL) {
                 char *kind, *object, *off, *anchor, *aoff, *words, *extra;
-                char *end;
+                char *end, *context = NULL;
                 unsigned long ov, wv;
 
                 line[strcspn(line, "\r\n")] = '\0';
@@ -504,13 +509,13 @@ load_removed_plan(struct removed_list *l, const char *name)
                 }
                 if (line[0] == '\0')
                         continue;
-                kind = strtok(line, "\t");
-                object = strtok(NULL, "\t");
-                off = strtok(NULL, "\t");
-                anchor = strtok(NULL, "\t");
-                aoff = strtok(NULL, "\t");
-                words = strtok(NULL, "\t");
-                extra = strtok(NULL, "\t");
+                kind = strtok_r(line, "\t", &context);
+                object = strtok_r(NULL, "\t", &context);
+                off = strtok_r(NULL, "\t", &context);
+                anchor = strtok_r(NULL, "\t", &context);
+                aoff = strtok_r(NULL, "\t", &context);
+                words = strtok_r(NULL, "\t", &context);
+                extra = strtok_r(NULL, "\t", &context);
                 if (kind == NULL || strcmp(kind, "FOLD") != 0 ||
                     object == NULL || off == NULL || anchor == NULL ||
                     aoff == NULL || words == NULL || extra != NULL) {

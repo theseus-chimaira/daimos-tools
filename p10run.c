@@ -11,6 +11,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+/* MSVC names its reentrant tokenizer strtok_s. */
+#if defined(_MSC_VER)
+#define strtok_r strtok_s
+#endif
 #include <errno.h>
 #include <ctype.h>
 #include <sys/types.h>
@@ -872,7 +877,7 @@ static int parse_examine_after(const char *text, const char *marker,
     while (*p != 0) {
         char line[256];
         size_t n;
-        char *tok;
+        char *tok, *context = NULL;
         struct p10_word last;
         int have;
         end = strchr(p, '\n');
@@ -880,11 +885,11 @@ static int parse_examine_after(const char *text, const char *marker,
         if (n >= sizeof(line)) n = sizeof(line) - 1U;
         memcpy(line, p, n); line[n] = 0;
         last.high = 0UL; last.low = 0UL; have = 0;
-        tok = strtok(line, " \t:=");
+        tok = strtok_r(line, " \t:=", &context);
         while (tok != NULL) {
             struct p10_word value;
             if (parse_p10_word(tok, &value)) { last = value; have = 1; }
-            tok = strtok(NULL, " \t:=");
+            tok = strtok_r(NULL, " \t:=", &context);
         }
         if (have) { *got = last; return 1; }
         if (end == NULL) break;
