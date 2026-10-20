@@ -1048,8 +1048,8 @@ int main(int argc, char **argv)
                 } else
                         usage();
         }
-        if (dir == NULL || n == 0U || n > MAX_MEMBERS ||
-            (ndir == 0U && nspec == 0U && nlink == 0U))
+        /* An empty root is valid for an auxiliary D6FS volume. */
+        if (dir == NULL || n == 0U || n > MAX_MEMBERS)
                 usage();
         for (i = 0U; i < ndir; ++i)
                 parse_dir_spec(dirs[i]);
