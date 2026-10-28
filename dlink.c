@@ -900,11 +900,34 @@ static int apply_relocs(struct linker *l, struct dobj_word *image,
                 } else {
                     if (r->target_sec == DOBJ_SEC_TEXT &&
                         l->fold_count != 0) {
-                        fprintf(stderr,
-                            "dlink: cannot fold out-of-range local TEXT addend\n");
-                        return -1;
+                        unsigned long anchor;
+                        unsigned long delta;
+                        /* Packed-byte pointers may legitimately address
+                         * the word before the first TEXT literal (e.g.
+                         * POINT 9,label-1,35). Relocate the boundary first,
+                         * then apply the signed displacement. The same rule
+                         * handles references just beyond the TEXT end.
+                         * Neither case may wrap the 18-bit address space. */
+                        if (add < 0L) {
+                            if (text_address(l, oi, 0UL, &anchor) != 0)
+                                return -1;
+                            delta = (unsigned long)(-(add + 1L)) + 1UL;
+                            if (delta > anchor)
+                                return -1;
+                            target = anchor - delta;
+                        } else {
+                            if (text_address(l, oi, lo->obj.text_words,
+                                &anchor) != 0)
+                                return -1;
+                            delta = (unsigned long)add - lo->obj.text_words;
+                            if (delta > HALF_MASK - anchor)
+                                return -1;
+                            target = anchor + delta;
+                        }
+                        add = 0L;
+                    } else {
+                        target = section_base(l, lo, r->target_sec);
                     }
-                    target = section_base(l, lo, r->target_sec);
                 }
                 relative = l->image_base == 0UL;
             } else if (r->type == DOBJ_RELOC_SYMBOL_RH18 ||
