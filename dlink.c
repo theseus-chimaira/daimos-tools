@@ -955,7 +955,11 @@ static int apply_relocs(struct linker *l, struct dobj_word *image,
                 return -1;
             }
             if ((long)target + add < 0L || (unsigned long)((long)target + add) > HALF_MASK) {
-                fprintf(stderr, "dlink: RH18 relocation overflow\n");
+                fprintf(stderr,
+                    "dlink: RH18 relocation overflow in %s at %06lo"
+                    " (type %lu, target %06lo, addend %ld)\n",
+                    lo->source_name, r->offset,
+                    (unsigned long)r->type, target, add);
                 return -1;
             }
             if (r->type == DOBJ_RELOC_LOCAL_LH18 ||
