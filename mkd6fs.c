@@ -414,7 +414,10 @@ static uint64_t *load_binwords(const char *path, unsigned *wordsp)
         fp = fopen(path, "rb");
         if (fp == NULL)
                 die_path(path);
-        if (fseek(fp, 0L, SEEK_END) != 0 || (size = ftell(fp)) < 0)
+        if (fseek(fp, 0L, SEEK_END) != 0)
+                die_path(path);
+        size = ftell(fp);
+        if (size < 0)
                 die_path(path);
         rewind(fp);
         if ((size % 8L) != 0L)
