@@ -253,11 +253,18 @@ fold_half_equal(const struct dobj_object *a, unsigned long ao,
     }
     if (ar->target_sec != br->target_sec)
         return 0;
-    if (ar->target_sec == DOBJ_SEC_TEXT &&
-        ar->addend.rh >= abase && ar->addend.rh < abase + span &&
-        br->addend.rh >= bbase && br->addend.rh < bbase + span)
-        return ar->addend.rh - abase == br->addend.rh - bbase &&
-               ar->addend.lh == br->addend.lh;
+    if (ar->target_sec == DOBJ_SEC_TEXT) {
+        int ain = ar->addend.rh >= abase && ar->addend.rh < abase + span;
+        int bin = br->addend.rh >= bbase && br->addend.rh < bbase + span;
+        if (ain != bin)
+            return 0;
+        if (ain)
+            return ar->addend.rh - abase == br->addend.rh - bbase &&
+                   ar->addend.lh == br->addend.lh;
+    }
+    /* Local section offsets in distinct objects are not shared targets. */
+    if (a != b)
+        return 0;
     return ar->addend.lh == br->addend.lh &&
            ar->addend.rh == br->addend.rh;
 }

@@ -201,17 +201,25 @@ half_equal(const struct input *a, unsigned long ao,
                     ar->addend.rh != br->addend.rh)
                         return 0;
         } else {
+                int ain;
+                int bin;
+
                 if (ar->target_sec != br->target_sec)
                         return 0;
-                if (ar->target_sec == DOBJ_SEC_TEXT &&
+                ain = ar->target_sec == DOBJ_SEC_TEXT &&
                     ar->addend.rh >= abase &&
-                    ar->addend.rh < abase + span &&
+                    ar->addend.rh < abase + span;
+                bin = br->target_sec == DOBJ_SEC_TEXT &&
                     br->addend.rh >= bbase &&
-                    br->addend.rh < bbase + span) {
+                    br->addend.rh < bbase + span;
+                if (ain != bin)
+                        return 0;
+                if (ain) {
                         if (ar->addend.rh - abase != br->addend.rh - bbase ||
                             ar->addend.lh != br->addend.lh)
                                 return 0;
-                } else if (ar->addend.lh != br->addend.lh ||
+                } else if (a != b ||
+                    ar->addend.lh != br->addend.lh ||
                     ar->addend.rh != br->addend.rh) {
                         return 0;
                 }
