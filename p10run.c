@@ -12,10 +12,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* MSVC names its reentrant tokenizer strtok_s. */
-#if defined(_MSC_VER)
-#define strtok_r strtok_s
-#endif
 #include <errno.h>
 #include <ctype.h>
 #include <sys/types.h>
@@ -877,7 +873,8 @@ static int parse_examine_after(const char *text, const char *marker,
     while (*p != 0) {
         char line[256];
         size_t n;
-        char *tok, *context = NULL;
+        char *tok;
+        char *cursor;
         struct p10_word last;
         int have;
         end = strchr(p, '\n');
@@ -885,12 +882,19 @@ static int parse_examine_after(const char *text, const char *marker,
         if (n >= sizeof(line)) n = sizeof(line) - 1U;
         memcpy(line, p, n); line[n] = 0;
         last.high = 0UL; last.low = 0UL; have = 0;
-        tok = strtok_r(line, " \t:=", &context);
-        while (tok != NULL) {
+        cursor = line;
+        while (*cursor != '\0') {
             struct p10_word value;
+            cursor += strspn(cursor, " \t:=");
+            if (*cursor == '\0')
+                break;
+            tok = cursor;
+            cursor += strcspn(cursor, " \t:=");
+            if (*cursor != '\0')
+                *cursor++ = '\0';
             if (parse_p10_word(tok, &value)) { last = value; have = 1; }
-            tok = strtok_r(NULL, " \t:=", &context);
         }
+
         if (have) { *got = last; return 1; }
         if (end == NULL) break;
         p = end + 1;

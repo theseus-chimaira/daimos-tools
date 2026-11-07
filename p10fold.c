@@ -2,10 +2,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* MSVC names its reentrant tokenizer strtok_s. */
-#if defined(_MSC_VER)
-#define strtok_r strtok_s
-#endif
 
 #include "dobj.h"
 
@@ -501,7 +497,7 @@ load_removed_plan(struct removed_list *l, const char *name)
         }
         while (fgets(line, sizeof(line), f) != NULL) {
                 char *kind, *object, *off, *anchor, *aoff, *words, *extra;
-                char *end, *context = NULL;
+                char *end;
                 unsigned long ov, wv;
 
                 line[strcspn(line, "\r\n")] = '\0';
@@ -517,16 +513,41 @@ load_removed_plan(struct removed_list *l, const char *name)
                 }
                 if (line[0] == '\0')
                         continue;
-                kind = strtok_r(line, "\t", &context);
-                object = strtok_r(NULL, "\t", &context);
-                off = strtok_r(NULL, "\t", &context);
-                anchor = strtok_r(NULL, "\t", &context);
-                aoff = strtok_r(NULL, "\t", &context);
-                words = strtok_r(NULL, "\t", &context);
-                extra = strtok_r(NULL, "\t", &context);
+                /* Preserve empty fields and reject trailing tab fields. */
+                {
+                        char *fields[6];
+                        char *cursor = line;
+                        unsigned i;
+
+                        for (i = 0; i < 6; ++i) {
+                                char *tab;
+
+                                fields[i] = cursor;
+                                tab = strchr(cursor, '\t');
+                                if (i == 5) {
+                                        if (tab != NULL)
+                                                break;
+                                } else {
+                                        if (tab == NULL)
+                                                break;
+                                        *tab = '\0';
+                                        cursor = tab + 1;
+                                }
+                        }
+                        kind = i == 6 ? fields[0] : NULL;
+                        object = i == 6 ? fields[1] : NULL;
+                        off = i == 6 ? fields[2] : NULL;
+                        anchor = i == 6 ? fields[3] : NULL;
+                        aoff = i == 6 ? fields[4] : NULL;
+                        words = i == 6 ? fields[5] : NULL;
+                        extra = NULL;
+                }
                 if (kind == NULL || strcmp(kind, "FOLD") != 0 ||
                     object == NULL || off == NULL || anchor == NULL ||
-                    aoff == NULL || words == NULL || extra != NULL) {
+                    aoff == NULL || words == NULL || extra != NULL ||
+                    *object == '\0' || *off == '\0' ||
+                    *anchor == '\0' || *aoff == '\0' ||
+                    *words == '\0') {
                         fprintf(stderr,
                             "p10fold: malformed anchor fold-plan line\n");
                         fclose(f);

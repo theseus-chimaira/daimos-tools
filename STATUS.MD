@@ -1,3 +1,34 @@
+## 2026-11-07 v1277: portable exact-field fold plans and Linux toolchain correction
+
+The existing v1141 source-level fix correctly prevents cross-object
+LOCAL TEXT target aliasing, but the independent Linux x86_64 host still
+had `p10fold`/`dlink` installed on 2026-10-13, before that correction.
+Its exact-current DAIMOS v1112 failed-RUN guest halted at PC zero
+after `<`; Android with byte-identical user INIT succeeded. A frozen
+DAIMOS source bisect isolated the first host failure to v1257, which
+changed the native link layout and exposed the stale folder. The old
+installed Linux `p10fold` independently FAILed the v1141 cross-object
+LOCAL relocation test. This was a toolchain defect, not justification
+to revert or weaken the production v1257 scheduler u-area guard.
+
+The host code already needed portable strict C99 plan-field parsing:
+`strtok_r` had no declaration under the Makefile's Linux C99/-Werror
+build, and tokenizer behavior does not preserve empty tab-delimited
+fields. v1277 uses explicit bounded six-field parsing in p10fold and
+dlink; p10run uses an explicit delimiter scan for examine output.
+No additional permanent guest code or RAM is added.
+
+Independently checked on Android aarch64 and Linux x86_64: strict
+host builds, real v1141 LOCAL relocation positive/negative controls,
+seven malformed fold-plan field negative tests, and the v1257 native
+scheduler locality/fatal-uarea tests all PASS. After installing the
+Linux tools from the versioned `local.tar.gz` package, current DAIMOS
+`226e7a5f` v1112 failed-RUN OOM-disabled full guest PASSes, and its
+KCORE low endpoint `023267` matches the Android guest exactly.
+The old Linux binaries are preserved in the versioned tool package's
+`previous-bin/` for rollback. The source changes are not a substitute
+for remaining F11/F12/F13 OOM release acceptance.
+
 # 2026-11-04 V1141: CROSS-OBJECT LOCAL RELOCATION SAFETY
 
 THE HOST P10FOLD/DLINK MATCHERS NOW DISTINGUISH EQUAL NUMERIC LOCAL

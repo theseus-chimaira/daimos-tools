@@ -4,10 +4,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* MSVC names its reentrant tokenizer strtok_s. */
-#if defined(_MSC_VER)
-#define strtok_r strtok_s
-#endif
 #include <limits.h>
 
 #define HALF_MASK 0777777UL
@@ -319,7 +315,7 @@ static int load_fold_plan(struct linker *l, const char *name)
         return -1;
     }
     while (fgets(line, sizeof(line), f) != NULL) {
-        char *kind, *dn, *doff, *an, *aoff, *words, *save, *context = NULL;
+        char *kind, *dn, *doff, *an, *aoff, *words, *save;
         unsigned long dv, av, wv;
         char *end;
         int di, ai;
@@ -336,16 +332,39 @@ static int load_fold_plan(struct linker *l, const char *name)
         }
         if (line[0] == '\0')
             continue;
-        kind = strtok_r(line, "\t", &context);
-        dn = strtok_r(NULL, "\t", &context);
-        doff = strtok_r(NULL, "\t", &context);
-        an = strtok_r(NULL, "\t", &context);
-        aoff = strtok_r(NULL, "\t", &context);
-        words = strtok_r(NULL, "\t", &context);
-        save = strtok_r(NULL, "\t", &context);
+        /* Split exactly six tab-separated fields without strtok's state. */
+        {
+            char *fields[6];
+            char *p = line;
+            unsigned i;
+
+            for (i = 0; i < 6; ++i) {
+                char *tab;
+
+                fields[i] = p;
+                tab = strchr(p, '\t');
+                if (i == 5) {
+                    if (tab != NULL)
+                        break;
+                } else {
+                    if (tab == NULL)
+                        break;
+                    *tab = '\0';
+                    p = tab + 1;
+                }
+            }
+            kind = i == 6 ? fields[0] : NULL;
+            dn = i == 6 ? fields[1] : NULL;
+            doff = i == 6 ? fields[2] : NULL;
+            an = i == 6 ? fields[3] : NULL;
+            aoff = i == 6 ? fields[4] : NULL;
+            words = i == 6 ? fields[5] : NULL;
+            save = NULL;
+        }
         if (kind == NULL || strcmp(kind, "FOLD") != 0 || dn == NULL ||
             doff == NULL || an == NULL || aoff == NULL || words == NULL ||
-            save != NULL) {
+            *dn == '\0' || *doff == '\0' || *an == '\0' ||
+            *aoff == '\0' || *words == '\0' || save != NULL) {
             fprintf(stderr, "dlink: malformed fold plan line\n");
             fclose(f);
             return -1;
