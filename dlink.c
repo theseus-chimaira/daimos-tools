@@ -980,7 +980,18 @@ static int apply_relocs(struct linker *l, struct dobj_word *image,
                 fprintf(stderr, "dlink: unsupported relocation type\n");
                 return -1;
             }
-            if ((long)target + add < 0L || (unsigned long)((long)target + add) > HALF_MASK) {
+            /* An RH18 displacement is an 18-bit effective-address
+             * expression.  Negative addends may cross address zero: the
+             * PDP-10 index adder wraps modulo 2^18, and a literal holding
+             * that address participates in the same arithmetic.  Preserve
+             * that wrap rather than rejecting valid a[n - constant] code.
+             * Do not relax positive overflow or LH18 relocation checks.
+             */
+            if (((long)target + add < 0L &&
+                 !((r->type == DOBJ_RELOC_SYMBOL_RH18 ||
+                    r->type == DOBJ_RELOC_LOCAL_RH18) && add < 0L &&
+                   (long)target + add >= -(long)HALF_MASK)) ||
+                (long)target + add > (long)HALF_MASK) {
                 fprintf(stderr,
                     "dlink: RH18 relocation overflow in %s at %06lo"
                     " (type %lu, target %06lo, addend %ld)\n",
