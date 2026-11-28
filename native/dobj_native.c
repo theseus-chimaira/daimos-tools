@@ -201,6 +201,20 @@ nd_obj_parse(int fd, kword_t base, struct nd_obj *obj)
         }
         obj->reloc_off = off;
         obj->object_words = obj->reloc_off - base + obj->reloc_count * 3UL;
+        /* Validate even records the caller will never inspect (darc copies
+         * whole objects). Reuse the header buffer; no relocation array. */
+        if (obj->reloc_count != 0UL) {
+                if (nd_seek(fd, off) != 0)
+                        return -1;
+                for (i = 0U; i < (unsigned int)obj->reloc_count; ++i) {
+                        if (nd_read_exact(fd, h, 3U) != 0)
+                                return -1;
+                        len = (unsigned int)((nd_lh(h[0]) >> 12) & 07UL);
+                        if (len < ND_RELOC_LOCAL_RH18 ||
+                            len > ND_RELOC_SYMBOL_LH18)
+                                return -1;
+                }
+        }
         return 0;
 }
 
@@ -276,6 +290,9 @@ nd_obj_reloc(int fd, const struct nd_obj *obj, unsigned int index,
                 return -1;
         rel->loc_sec = (unsigned int)((nd_lh(r[0]) >> 15) & 07UL);
         rel->type = (unsigned int)((nd_lh(r[0]) >> 12) & 07UL);
+        if (rel->type < ND_RELOC_LOCAL_RH18 ||
+            rel->type > ND_RELOC_SYMBOL_LH18)
+                return -1;
         rel->target_sec = (unsigned int)((nd_lh(r[0]) >> 9) & 07UL);
         rel->offset = nd_rh(r[0]);
         rel->symbol = nd_rh(r[1]);

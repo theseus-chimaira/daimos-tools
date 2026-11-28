@@ -241,6 +241,10 @@ int dobj_read(FILE *f, struct dobj_object *obj)
             dobj_read_word(f, &obj->relocs[i].addend) != 0) goto bad;
         obj->relocs[i].loc_sec = (int)((r0.lh >> 15) & 07UL);
         obj->relocs[i].type = (int)((r0.lh >> 12) & 07UL);
+        /* DOBJ1 only defines independent halfword relocations. Never
+         * pass an unknown kind to an optimizer or archive writer. */
+        if (obj->relocs[i].type < DOBJ_RELOC_LOCAL_RH18 ||
+            obj->relocs[i].type > DOBJ_RELOC_SYMBOL_LH18) goto bad;
         obj->relocs[i].target_sec = (int)((r0.lh >> 9) & 07UL);
         obj->relocs[i].offset = r0.rh;
         obj->relocs[i].symbol = r1.rh;
@@ -258,6 +262,11 @@ int dobj_write(FILE *f, const struct dobj_object *obj)
     struct dobj_word h[5];
     unsigned long i;
 
+    /* Refuse invalid in-memory objects before writing even the header. */
+    for (i = 0UL; i < obj->reloc_count; i++)
+        if (obj->relocs[i].type < DOBJ_RELOC_LOCAL_RH18 ||
+            obj->relocs[i].type > DOBJ_RELOC_SYMBOL_LH18)
+            return -1;
     h[0] = sixbit_word(DOBJ_MAGIC_TEXT);
     h[1] = dobj_word_halves(obj->text_words, obj->data_words);
     h[2] = dobj_word_halves(obj->bss_words, obj->symbol_count);
