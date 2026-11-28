@@ -418,6 +418,10 @@ jump_foldable_block(const struct input *in, unsigned long off,
         if (words < 2UL || off + words > in->obj.text_words ||
             !block_ends_path(in, off, words))
                 return 0;
+        /* A preceding skip can enter the second word without executing
+         * the retained JRST. That implicit edge cannot be relocated. */
+        if (off != 0UL && may_skip_next(in, off - 1UL))
+                return 0;
         /*
          * Word zero remains present and becomes the JRST to the external
          * anchor.  No independently reachable address may therefore live in
